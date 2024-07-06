@@ -1,0 +1,16 @@
+[package]
+name = "eigenda-kzg"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sheheryar Parvaz <me@cherryman.org>"]
+
+[dependencies]
+
+[target.'cfg(all(target_os = "zkvm", target_vendor = "succinct", target_arch = "riscv32"))'.dependencies]
+sp1-zkvm = { git = "https://github.com/succinctlabs/sp1", branch = "main" }
+
+[target.'cfg(not(all(target_os = "zkvm", target_vendor = "succinct", target_arch = "riscv32")))'.dependencies]
+ark-bn254 = "0.4.0"
+ark-ec = "0.4.2"
+ark-ff = "0.4.2"
+ark-std = "0.4.0"

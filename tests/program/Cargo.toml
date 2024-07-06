@@ -1,0 +1,9 @@
+[workspace]
+[package]
+version = "0.1.0"
+name = "tests-program"
+edition = "2021"
+
+[dependencies]
+eigenda-kzg = { path = "../.." }
+sp1-zkvm = { git = "https://github.com/succinctlabs/sp1.git", branch = "main" }

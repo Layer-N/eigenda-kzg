@@ -1,0 +1,14 @@
+[workspace]
+
+[package]
+name = "eigenda-kzg-points-gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ark-bn254 = "0.4.0"
+ark-ec = "0.4.2"
+ark-ff = "0.4.2"
+ark-poly = { version = "0.4.2", features = ["parallel"] }
+rayon = "1.10.0"
+rust-kzg-bn254 = { git = "https://github.com/Layr-Labs/rust-kzg-bn254.git", version = "0.2.0" }

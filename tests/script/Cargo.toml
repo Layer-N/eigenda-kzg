@@ -1,0 +1,22 @@
+[workspace]
+[package]
+version = "0.1.0"
+name = "tests-script"
+edition = "2021"
+
+[dependencies]
+ark-ec = "0.4.2"
+ark-ff = "0.4.2"
+eigenda-kzg = { path = "../.." }
+rand = "0.8.5"
+rand_pcg = "0.3.1"
+rayon = "1.10.0"
+rust-kzg-bn254 = { git = "https://github.com/cherryman/rust-kzg-bn254.git" }
+sp1-sdk = { git = "https://github.com/succinctlabs/sp1.git", branch = "main" }
+
+[build-dependencies]
+sp1-helper = { git = "https://github.com/succinctlabs/sp1.git", branch = "main" }
+
+[profile.test]
+# sp1 overflows the stack otherwise.
+inherits = "release"
