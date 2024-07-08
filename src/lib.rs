@@ -1,77 +1,28 @@
 mod points;
 
-#[cfg(all(
-    target_os = "zkvm",
-    target_vendor = "succinct",
-    target_arch = "riscv32"
-))]
-fn msm_zkvm(gs: &[[u64; 8]], es: impl IntoIterator<Item = [u32; 8]>) -> Option<[u8; 64]> {
-    #![allow(clippy::assertions_on_constants)]
-    use std::mem::{align_of, size_of};
-
-    extern "C" {
-        fn syscall_bn254_add(p: *mut u32, q: *const u32);
-        fn syscall_bn254_double(p: *mut u32);
-    }
-
-    fn trans(x: &[u64; 8]) -> &[u32; 16] {
-        // SAFETY: Per const assertions above.
-        unsafe { &*(x as *const _ as *const _) }
-    }
-
-    fn bn254_add(p: &mut [u32; 16], q: &[u32; 16]) {
-        unsafe { syscall_bn254_add(p.as_mut_ptr(), q.as_ptr()) }
-    }
-
-    fn bn254_double(p: &mut [u32; 16]) {
-        unsafe { syscall_bn254_double(p.as_mut_ptr()) }
-    }
-
-    fn bn254_mul(g: &[u32; 16], e: &[u32; 8]) -> Option<[u32; 16]> {
-        let mut r: Option<[u32; 16]> = None;
-        for i in (0..254).rev() {
-            let (word, bit) = (i / 32, i % 32);
-
-            if let Some(r) = &mut r {
-                bn254_double(r);
-            }
-
-            if e[word] >> bit & 1 == 0 {
-                continue;
-            }
-
-            match &mut r {
-                Some(r) => bn254_add(r, g),
-                None => r = Some(*g),
-            }
-        }
-        r
-    }
-
-    // Sanity checks to ensure casting is safe.
-    const _: () = assert!(std::cfg!(target_endian = "little"));
-    const _: () = assert!(size_of::<[u64; 8]>() == size_of::<[u32; 16]>());
-    const _: () = assert!(size_of::<[u32; 16]>() == size_of::<[u8; 64]>());
-    const _: () = assert!(align_of::<[u64; 8]>() >= align_of::<[u32; 16]>());
-    const _: () = assert!(align_of::<[u32; 16]>() >= align_of::<[u8; 64]>());
-
-    // SAFETY: Per assertions above.
-    let gs: &[[u32; 16]] = unsafe { &*(gs as *const _ as *const _) };
-    let mut r: Option<[u32; 16]> = None;
-
-    for (g, e) in gs.iter().zip(es.into_iter()) {
-        if let Some(g) = bn254_mul(g, &e) {
-            match &mut r {
-                Some(r) => bn254_add(r, &g),
-                None => r = Some(g),
-            }
-        }
-    }
-
-    // SAFETY: Per const assertions above.
-    Some(unsafe { std::mem::transmute(r?) })
+/// Computes the commitment of a blob of data.
+///
+/// Inserts padding as per EigenDA's [blob serialization requirements].
+/// Empty blobs and blobs larger than [`MAX_BLOB_SIZE`] return an error.
+/// All other blobs return a 64-byte commitment. A zero commitment is
+/// encoded as a 64-byte array of zeros.
+///
+/// [blob serialization requirements]: https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements
+pub fn commit(xs: &[u8]) -> Result<[u8; 64], Error> {
+    commit_(xs).map(|x| x.unwrap_or([0; 64]))
 }
 
+// Each chunk is padded to 32 bytes to match serialization requirements.
+const CHUNK_SIZE: usize = 31;
+
+/// Blobs larger than this size return an error.
+pub const MAX_BLOB_SIZE: usize = points::G1_EVALS[points::G1_EVALS.len() - 1].len() * CHUNK_SIZE;
+
+/// Possible errors returned by [`commit`].
+///
+/// This only happens if the blob size is out of range. If
+/// the blob has length within `1..=MAX_BLOB_SIZE`, [`commit`]
+/// will always return ok.
 #[derive(Debug)]
 pub enum Error {
     BlobEmpty,
@@ -89,23 +40,80 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Computes the commitment of a blob of data.
-///
-/// Inserts padding as per EigenDA's [blob serialization requirements].
-/// Empty blobs and blobs larger than [`MAX_BLOB_SIZE`] return an error.
-/// All other blobs return a 64-byte commitment. A zero commitment is
-/// encoded as a 64-byte array of zeros.
-///
-/// [blob serialization requirements]: https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements
-pub fn commit(xs: &[u8]) -> Result<[u8; 64], Error> {
-    commit_(xs).map(|x| x.unwrap_or([0; 64]))
+#[cfg(all(
+    target_os = "zkvm",
+    target_vendor = "succinct",
+    target_arch = "riscv32"
+))]
+fn msm_zkvm(gs: &[[u64; 8]], xs: &[u8]) -> Option<[u8; 64]> {
+    #![allow(clippy::assertions_on_constants)]
+    use std::mem::{align_of, size_of};
+
+    // Sanity checks to ensure casting is safe.
+    const _: () = assert!(std::cfg!(target_endian = "little"));
+    const _: () = assert!(size_of::<[u64; 8]>() == size_of::<[u32; 16]>());
+    const _: () = assert!(size_of::<[u32; 16]>() == size_of::<[u8; 64]>());
+    const _: () = assert!(align_of::<[u64; 8]>() >= align_of::<[u32; 16]>());
+    const _: () = assert!(align_of::<[u32; 16]>() >= align_of::<[u8; 64]>());
+
+    extern "C" {
+        fn syscall_bn254_add(p: *mut u32, q: *const u32);
+        fn syscall_bn254_double(p: *mut u32);
+    }
+
+    fn bn254_add(p: &mut [u32; 16], q: &[u32; 16]) {
+        unsafe { syscall_bn254_add(p.as_mut_ptr(), q.as_ptr()) }
+    }
+
+    fn bn254_double(p: &mut [u32; 16]) {
+        unsafe { syscall_bn254_double(p.as_mut_ptr()) }
+    }
+
+    // `e` is big-endian.
+    fn bn254_mul(g: &[u32; 16], e: &[u8; CHUNK_SIZE]) -> Option<[u32; 16]> {
+        let mut r: Option<[u32; 16]> = None;
+        for byte in e.iter() {
+            for bit in (0..8).rev() {
+                if let Some(r) = &mut r {
+                    bn254_double(r);
+                }
+
+                if byte >> bit & 1 == 0 {
+                    continue;
+                }
+
+                match &mut r {
+                    Some(r) => bn254_add(r, g),
+                    None => r = Some(*g),
+                }
+            }
+        }
+        r
+    }
+
+    // SAFETY: Per assertions above.
+    let gs: &[[u32; 16]] = unsafe { &*(gs as *const _ as *const _) };
+    let es = xs.chunks(CHUNK_SIZE).map(|x| {
+        let mut buf = [0; CHUNK_SIZE];
+        buf[..x.len()].copy_from_slice(x);
+        buf
+    });
+    let mut r: Option<[u32; 16]> = None;
+
+    for (g, e) in gs.iter().zip(es) {
+        if let Some(g) = bn254_mul(g, &e) {
+            match &mut r {
+                Some(r) => bn254_add(r, &g),
+                None => r = Some(g),
+            }
+        }
+    }
+
+    // SAFETY: Per const assertions above.
+    Some(unsafe { std::mem::transmute(r?) })
 }
 
-pub const MAX_BLOB_SIZE: usize = points::G1_EVALS[points::G1_EVALS.len() - 1].len() * 31;
-
-fn blob_to_padded_le_chunks(
-    xs: &[u8],
-) -> Result<(&'static [[u64; 8]], impl Iterator<Item = [u8; 32]> + '_), Error> {
+fn validate_blob(xs: &[u8]) -> Result<&'static [[u64; 8]], Error> {
     if xs.is_empty() {
         return Err(Error::BlobEmpty);
     }
@@ -114,15 +122,13 @@ fn blob_to_padded_le_chunks(
         return Err(Error::BlobTooLarge);
     }
 
-    let it = xs.chunks(31).map(|x| {
-        let mut buf = [0; 32];
-        buf[1..x.len() + 1].copy_from_slice(x);
-        buf.reverse();
-        buf
-    });
-    let l = xs.len().div_ceil(31).next_power_of_two().trailing_zeros() as usize;
+    let l = xs
+        .len()
+        .div_ceil(CHUNK_SIZE)
+        .next_power_of_two()
+        .trailing_zeros() as usize;
 
-    Ok((points::G1_EVALS[l], it))
+    Ok(points::G1_EVALS[l])
 }
 
 #[cfg(all(
@@ -132,17 +138,7 @@ fn blob_to_padded_le_chunks(
 ))]
 #[inline]
 fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, Error> {
-    #[inline]
-    fn to_rv32_limb(x: [u8; 32]) -> [u32; 8] {
-        let mut r = [0u32; 8];
-        for i in 0..8 {
-            r[i] = u32::from_le_bytes(x[i * 4..(i + 1) * 4].try_into().unwrap());
-        }
-        r
-    }
-    let (gs, it) = blob_to_padded_le_chunks(xs)?;
-    let es = it.map(to_rv32_limb);
-    Ok(msm_zkvm(gs, es))
+    Ok(msm_zkvm(validate_blob(xs)?, xs))
 }
 
 #[cfg(not(all(
@@ -157,10 +153,17 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, Error> {
     use ark_ec::{CurveGroup as _, VariableBaseMSM as _};
     use ark_ff::{BigInt, BigInteger, PrimeField};
 
-    let (gs, it) = blob_to_padded_le_chunks(xs)?;
+    let gs = validate_blob(xs)?;
 
-    let es = it
-        .map(|x| Fr::from_le_bytes_mod_order(&x))
+    let es = xs
+        .chunks(CHUNK_SIZE)
+        .map(|x| {
+            let mut buf = [0; CHUNK_SIZE];
+            buf[..x.len()].copy_from_slice(x);
+            buf.reverse();
+            // `be` variant seems to internally allocate.
+            Fr::from_le_bytes_mod_order(&buf)
+        })
         .collect::<Vec<_>>();
 
     let gs = gs
