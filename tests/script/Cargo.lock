@@ -4001,7 +4001,7 @@ checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 [[package]]
 name = "rust-kzg-bn254"
 version = "0.2.0"
-source = "git+https://github.com/cherryman/rust-kzg-bn254.git#d95f06d39d02fc9f33d09414df1fff0260ef0bc6"
+source = "git+https://github.com/cherryman/rust-kzg-bn254.git#2ea665f3a50fd90315fed97881ae337b0956eac4"
 dependencies = [
  "ark-bn254",
  "ark-ec",

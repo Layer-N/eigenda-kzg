@@ -133,16 +133,15 @@ fn test_zeros() {
 #[test]
 fn test_random() {
     let mut rng = rand_pcg::Pcg64Mcg::new(0);
-    (0..1024)
-        .map(|_| {
-            let len = rng.gen_range(1..=eigenda_kzg::MAX_BLOB_SIZE);
-            sample(&mut rng, len)
-        })
+    (1..)
+        .map(|x| 1.5f64.powi(x) as usize)
+        .take_while(|&x| x <= eigenda_kzg::MAX_BLOB_SIZE)
+        .map(|x| sample(&mut rng, x))
         .collect::<Vec<_>>()
         .par_iter()
         .for_each(|x| {
-            let expected = compute_eigenlib(&x).unwrap();
-            assert_eq!(compute_native(&x).unwrap(), expected);
-            assert_eq!(compute_sp1(&x).unwrap(), expected);
+            let expected = compute_eigenlib(x).unwrap();
+            assert_eq!(compute_native(x).unwrap(), expected);
+            assert_eq!(compute_sp1(x).unwrap(), expected);
         });
 }
