@@ -6,6 +6,10 @@ authors = ["Sheheryar Parvaz <me@cherryman.org>"]
 
 [dependencies]
 
+[dev-dependencies]
+kzgpad-rs = { git = "https://github.com/Layr-Labs/kzgpad-rs.git" }
+proptest = "1.5.0"
+
 [target.'cfg(all(target_os = "zkvm", target_vendor = "succinct", target_arch = "riscv32"))'.dependencies]
 sp1-zkvm = { git = "https://github.com/succinctlabs/sp1", branch = "main" }
 

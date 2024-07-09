@@ -1,7 +1,5 @@
 //! Evaluation forms of EigenDA's SRS G1.
 
-use std::include_bytes;
-
 // Trick to control alignment of `include_bytes`.
 // https://users.rust-lang.org/t/can-i-conveniently-compile-bytes-into-a-rust-program-with-a-specific-alignment/24049
 #[repr(C)]
