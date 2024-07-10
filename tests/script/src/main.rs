@@ -13,7 +13,7 @@ fn main() {
     sp1_sdk::utils::setup_logger();
 
     let mut rng = rand_pcg::Pcg64Mcg::new(0);
-    let input = (0..(1 << 16))
+    let input = (0..(1 << 20))
         .map(|_| rand::Rng::gen::<u8>(&mut rng))
         .collect::<Vec<_>>();
     let mut stdin = SP1Stdin::new();

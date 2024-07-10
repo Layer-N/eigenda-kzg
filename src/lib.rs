@@ -136,10 +136,13 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-#[cfg(all(
-    target_os = "zkvm",
-    target_vendor = "succinct",
-    target_arch = "riscv32"
+#[cfg(any(
+    test,
+    all(
+        target_os = "zkvm",
+        target_vendor = "succinct",
+        target_arch = "riscv32"
+    )
 ))]
 fn msm_zkvm(gs: &[[u64; 8]], xs: &[u8]) -> Option<[u8; 64]> {
     #![allow(clippy::assertions_on_constants)]
@@ -296,10 +299,279 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
 }
 
 #[cfg(test)]
+mod polyfill {
+    use bnum::types::{U256, U512};
+    use bnum::BTryFrom;
+
+    const BASE_MOD: U256 = U256::parse_str_radix(
+        "21888242871839275222246405745257275088696311157297823662689037894645226208583",
+        10,
+    );
+    const BASE_MOD_U512: U512 = U512::parse_str_radix(
+        "21888242871839275222246405745257275088696311157297823662689037894645226208583",
+        10,
+    );
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct G1(U256, U256);
+
+    fn sub(a: U256, b: U256) -> U256 {
+        (a + BASE_MOD - b) % BASE_MOD
+    }
+
+    fn mul(a: U256, b: U256) -> U256 {
+        let a = <U512 as BTryFrom<U256>>::try_from(a).unwrap();
+        let b = <U512 as BTryFrom<U256>>::try_from(b).unwrap();
+        let a = (a * b) % BASE_MOD_U512;
+        <U256 as BTryFrom<U512>>::try_from(a).unwrap()
+    }
+
+    fn sq(a: U256) -> U256 {
+        let a = <U512 as BTryFrom<U256>>::try_from(a).unwrap();
+        let a = (a * a) % BASE_MOD_U512;
+        <U256 as BTryFrom<U512>>::try_from(a).unwrap()
+    }
+
+    fn div(a: U256, b: U256) -> U256 {
+        mul(a, pow(b, BASE_MOD - U256::TWO))
+    }
+
+    fn pow(a: U256, e: U256) -> U256 {
+        let a = <U512 as BTryFrom<U256>>::try_from(a).unwrap();
+        let mut r = U512::ONE;
+        for bit in (0..e.bits()).rev() {
+            if r != U512::ONE {
+                r *= r;
+                r %= BASE_MOD_U512;
+            }
+
+            if e.bit(bit) {
+                r *= a;
+                r %= BASE_MOD_U512;
+            }
+        }
+        <U256 as BTryFrom<U512>>::try_from(r).unwrap()
+    }
+
+    impl G1 {
+        pub fn from_le_bytes(bytes: &[u32]) -> Self {
+            let mut x = [0u8; 32];
+            let mut y = [0u8; 32];
+            for i in 0..8 {
+                x[i * 4..][..4].copy_from_slice(&bytes[i].to_le_bytes());
+                y[i * 4..][..4].copy_from_slice(&bytes[i + 8].to_le_bytes());
+            }
+            let x = U256::from_le_slice(&x).unwrap();
+            let y = U256::from_le_slice(&y).unwrap();
+            G1(x, y)
+        }
+
+        pub fn to_le_bytes(&self) -> [u32; 16] {
+            let mut x = self.0.to_radix_le(256);
+            x.extend(std::iter::repeat(0).take(32 - x.len()));
+            let mut y = self.1.to_radix_le(256);
+            y.extend(std::iter::repeat(0).take(32 - y.len()));
+            let mut r = [0u32; 16];
+            for i in 0..8 {
+                r[i] = u32::from_le_bytes(x[i * 4..][..4].try_into().unwrap());
+                r[i + 8] = u32::from_le_bytes(y[i * 4..][..4].try_into().unwrap());
+            }
+            r
+        }
+
+        pub fn double(&mut self) {
+            let slope = div(sq(self.0) * U256::THREE, self.1 * U256::TWO);
+            let x = sub(sq(slope), self.0 * U256::TWO);
+            let y = sub(mul(slope, sub(self.0, x)), self.1);
+            *self = G1(x, y);
+        }
+
+        pub fn add_assign(&mut self, q: &G1) {
+            let slope = div(sub(q.1, self.1), sub(q.0, self.0));
+            let x = sub(sq(slope), (self.0 + q.0) % BASE_MOD);
+            let y = sub(mul(slope, sub(self.0, x)), self.1);
+            *self = G1(x, y);
+        }
+    }
+
+    #[test]
+    fn g1_double() {
+        let r = G1(
+            U256::parse_str_radix(
+                "1368015179489954701390400359078579693043519447331113978918064868415326638035",
+                10,
+            ),
+            U256::parse_str_radix(
+                "9918110051302171585080402603319702774565515993150576347155970296011118125764",
+                10,
+            ),
+        );
+        let mut g = G1::from_le_bytes(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+        g.double();
+        assert_eq!(g, r);
+    }
+
+    #[test]
+    fn g1_add() {
+        let r = G1(
+            U256::parse_str_radix(
+                "3353031288059533942658390886683067124040920775575537747144343083137631628272",
+                10,
+            ),
+            U256::parse_str_radix(
+                "19321533766552368860946552437480515441416830039777911637913418824951667761761",
+                10,
+            ),
+        );
+        let mut a = G1::from_le_bytes(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+        let mut b = G1::from_le_bytes(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+        b.double();
+        a.add_assign(&b);
+        assert_eq!(a, r);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use ark_bn254::{Fq, G1Affine, G1Projective};
+    use ark_ec::{AffineRepr as _, CurveGroup as _, Group as _};
+    use ark_ff::{BigInteger as _, PrimeField as _};
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use std::sync::OnceLock;
+
+    fn into_g1(g: &[u32]) -> ark_bn254::G1Affine {
+        assert!(g.len() == 16);
+        let mut x = [0u8; 32];
+        let mut y = [0u8; 32];
+        for i in 0..8 {
+            x[i * 4..][..4].copy_from_slice(&g[i].to_le_bytes());
+            y[i * 4..][..4].copy_from_slice(&g[i + 8].to_le_bytes());
+        }
+        G1Affine::new(
+            Fq::from_le_bytes_mod_order(&x),
+            Fq::from_le_bytes_mod_order(&y),
+        )
+    }
+
+    fn from_g1(g: ark_bn254::G1Affine) -> [u32; 16] {
+        let (x, y) = g.xy().unwrap();
+        let x = x.into_bigint().to_bytes_le();
+        let y = y.into_bigint().to_bytes_le();
+        assert!(x.len() <= 32);
+        assert!(y.len() <= 32);
+        let mut r = [0u32; 16];
+        for i in 0..8 {
+            r[i] = u32::from_le_bytes(x[i * 4..][..4].try_into().unwrap());
+            r[i + 8] = u32::from_le_bytes(y[i * 4..][..4].try_into().unwrap());
+        }
+        r
+    }
+
+    // Polyfill the zkvm syscalls so we can test the prover version
+    // without running the prover, which is quite expensive.
+
+    #[no_mangle]
+    extern "C" fn syscall_bn254_add(p: *mut u32, q: *const u32) {
+        let p = unsafe { std::slice::from_raw_parts_mut(p, 16) };
+        let q = unsafe { std::slice::from_raw_parts(q, 16) };
+        //let r = (into_g1(p) + into_g1(q)).into_affine();
+        //p.copy_from_slice(&from_g1(r));
+        let mut r = polyfill::G1::from_le_bytes(p);
+        let q = polyfill::G1::from_le_bytes(q);
+        r.add_assign(&q);
+        p.copy_from_slice(&r.to_le_bytes());
+    }
+
+    #[no_mangle]
+    extern "C" fn syscall_bn254_double(p: *mut u32) {
+        let p = unsafe { std::slice::from_raw_parts_mut(p, 16) };
+        //let r = G1Projective::from(into_g1(p)).double().into_affine();
+        //p.copy_from_slice(&from_g1(r));
+        let mut r = polyfill::G1::from_le_bytes(p);
+        r.double();
+        p.copy_from_slice(&r.to_le_bytes());
+    }
+
+    fn commit_zkvm(xs: &[u8]) -> Result<[u8; 64], CommitError> {
+        Ok(msm_zkvm(validate_blob(xs)?, xs).unwrap_or([0; 64]))
+    }
+
+    fn commit_eigen(xs: &[u8]) -> Result<[u8; 64], Box<dyn std::error::Error>> {
+        static MEMO: OnceLock<rust_kzg_bn254::kzg::Kzg> = OnceLock::new();
+        let kzg = MEMO.get_or_init(|| {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("points");
+            let g1 = root.join("g1.point");
+            let g2 = root.join("g2.point.powerOf2");
+            if !g1.exists() || !g2.exists() {
+                panic!("`points/g1.point` or `points/g2.point.powerOf2` missing, see readme");
+            }
+            rust_kzg_bn254::kzg::Kzg::setup(
+                g1.to_str().unwrap(),
+                "",
+                g2.to_str().unwrap(),
+                268435456,
+                131072,
+            )
+            .unwrap()
+        });
+        let poly = {
+            let mut blob = rust_kzg_bn254::blob::Blob::new(xs.to_vec());
+            blob.pad_data().unwrap();
+            blob.to_polynomial(rust_kzg_bn254::polynomial::PolynomialFormat::InCoefficientForm)?
+        };
+        let c = kzg.commit(&poly)?;
+        let Some((x, y)) = c.xy() else {
+            return Ok([0; 64]);
+        };
+        let x = x.into_bigint().to_bytes_le();
+        let y = y.into_bigint().to_bytes_le();
+        Ok([x, y].concat().try_into().unwrap())
+    }
+
+    #[test]
+    fn commit_empty() {
+        assert_eq!(commit(&[]), Err(CommitError::Empty));
+        assert_eq!(commit_zkvm(&[]), Err(CommitError::Empty));
+        assert!(commit_eigen(&[]).is_err());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn commit_too_large(xs in vec(any::<u8>(), MAX_BLOB_SIZE + 1..MAX_BLOB_SIZE * 2)) {
+            prop_assert_eq!(commit(&xs), Err(CommitError::TooLarge));
+            prop_assert_eq!(commit_zkvm(&xs), Err(CommitError::TooLarge));
+            prop_assert!(commit_eigen(&xs).is_err());
+        }
+
+        #[test]
+        fn commit_largest(xs in vec(any::<u8>(), MAX_BLOB_SIZE)) {
+            let expected = commit_eigen(&xs).unwrap();
+            prop_assert_eq!(commit(&xs).unwrap(), expected);
+            prop_assert_eq!(commit_zkvm(&xs).unwrap(), expected);
+        }
+
+        #[test]
+        fn commit_zeroes(xs in vec(0u8..=0, 1..=MAX_BLOB_SIZE)) {
+            prop_assert_eq!(commit(&xs).unwrap(), [0; 64]);
+            prop_assert_eq!(commit_zkvm(&xs).unwrap(), [0; 64]);
+            prop_assert_eq!(commit_eigen(&xs).unwrap(), [0; 64]);
+        }
+
+        #[test]
+        //fn commit_random(xs in vec(any::<u8>(), 1..=MAX_BLOB_SIZE)) {
+        fn commit_random(xs in vec(any::<u8>(), 1_0_000..=1_0_000)) {
+            //let expected = commit_eigen(&xs).unwrap();
+            //prop_assert_eq!(commit(&xs).unwrap(), expected);
+            let t = std::time::Instant::now();
+            commit_zkvm(&xs).unwrap();
+            //prop_assert_eq!(commit_zkvm(&xs).unwrap(), expected);
+            println!("elapsed zkvm: {:?}", t.elapsed());
+        }
+    }
 
     #[test]
     fn canonical_enc_dec_empty() {

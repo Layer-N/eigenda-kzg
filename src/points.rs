@@ -83,6 +83,7 @@ macro_rules! convert {
 /// Points are stored as arrays of `u64` to allow safe casting from
 /// `&[u64; 8]` to `&[u32; 16]` for use with RISC-V based zkVMs like
 /// sp1, while also being convenient to use for libraries like Arkworks.
+#[cfg(target_endian = "little")]
 pub const G1_EVALS: &[&[[u64; 8]]] = unsafe {
     convert! {
         G1_EVAL_00,
