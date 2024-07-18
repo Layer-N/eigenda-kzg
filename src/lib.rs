@@ -7,14 +7,18 @@ const ELEM_SIZE: usize = 32;
 const CHUNK_SIZE: usize = ELEM_SIZE - 1;
 
 /// Blobs larger than this size return an error.
-pub const MAX_BLOB_SIZE: usize = points::G1_EVALS[points::G1_EVALS.len() - 1].len() * CHUNK_SIZE;
+pub const MAX_BLOB_SIZE: usize =
+    points::G1_EVALS_U8_LE[points::G1_EVALS_U8_LE.len() - 1].len() * CHUNK_SIZE;
 
 /// Computes the commitment of a blob of data.
 ///
 /// You **do not** need to call [`canonical_encode`], as this function already
-/// inserts padding as per EigenDA's [blob serialization requirements].
+/// inserts padding as per EigenDA's [blob serialization requirements]. If you
+/// need to compute the commitment to a blob of data that is already serialized,
+/// use [`canonical_decode`] to deserialize it first.
+///
 /// Zero-length blobs and blobs larger than [`MAX_BLOB_SIZE`] return an error.
-/// All other blobs return a 64-byte commitment.
+/// All other blobs return a valid 64-byte commitment.
 ///
 /// The commitment is a G1 point on the BN254 curve, serialized as a
 /// 64-byte array of little-endian bytes. The first 32 bytes correspond
@@ -141,16 +145,9 @@ impl std::error::Error for DecodeError {}
     target_vendor = "succinct",
     target_arch = "riscv32"
 ))]
-fn msm_zkvm(gs: &[[u64; 8]], xs: &[u8]) -> Option<[u8; 64]> {
+fn msm_zkvm(gs: &[[u32; 16]], xs: &[u8]) -> Option<[u8; 64]> {
     #![allow(clippy::assertions_on_constants)]
     use std::mem::{align_of, size_of};
-
-    // Sanity checks to ensure casting is safe.
-    const _: () = assert!(std::cfg!(target_endian = "little"));
-    const _: () = assert!(size_of::<[u64; 8]>() == size_of::<[u32; 16]>());
-    const _: () = assert!(size_of::<[u32; 16]>() == size_of::<[u8; 64]>());
-    const _: () = assert!(align_of::<[u64; 8]>() >= align_of::<[u32; 16]>());
-    const _: () = assert!(align_of::<[u32; 16]>() >= align_of::<[u8; 64]>());
 
     extern "C" {
         fn syscall_bn254_add(p: *mut u32, q: *const u32);
@@ -187,8 +184,6 @@ fn msm_zkvm(gs: &[[u64; 8]], xs: &[u8]) -> Option<[u8; 64]> {
         r
     }
 
-    // SAFETY: Per assertions above.
-    let gs: &[[u32; 16]] = unsafe { &*(gs as *const _ as *const _) };
     let es = xs.chunks(CHUNK_SIZE).map(|x| {
         let mut buf = [0; CHUNK_SIZE];
         buf[..x.len()].copy_from_slice(x);
@@ -205,11 +200,17 @@ fn msm_zkvm(gs: &[[u64; 8]], xs: &[u8]) -> Option<[u8; 64]> {
         }
     }
 
+    // Sanity checks to ensure casting is safe.
+    const _: () = assert!(std::cfg!(target_endian = "little"));
+    const _: () = assert!(size_of::<[u32; 16]>() == size_of::<[u8; 64]>());
+    const _: () = assert!(align_of::<[u32; 16]>() >= align_of::<[u8; 64]>());
+
     // SAFETY: Per const assertions above.
     Some(unsafe { std::mem::transmute(r?) })
 }
 
-fn validate_blob(xs: &[u8]) -> Result<&'static [[u64; 8]], CommitError> {
+/// Validates blob size, returning the appropriate index of `points::G1_EVALS`.
+fn validate_blob(xs: &[u8]) -> Result<usize, CommitError> {
     if xs.is_empty() {
         return Err(CommitError::Empty);
     }
@@ -224,7 +225,7 @@ fn validate_blob(xs: &[u8]) -> Result<&'static [[u64; 8]], CommitError> {
         .next_power_of_two()
         .trailing_zeros() as usize;
 
-    Ok(points::G1_EVALS[l])
+    Ok(l)
 }
 
 #[cfg(all(
@@ -234,7 +235,7 @@ fn validate_blob(xs: &[u8]) -> Result<&'static [[u64; 8]], CommitError> {
 ))]
 #[inline]
 fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
-    Ok(msm_zkvm(validate_blob(xs)?, xs))
+    Ok(msm_zkvm(points::G1_EVALS_U32_LE[validate_blob(xs)?], xs))
 }
 
 #[cfg(not(all(
@@ -249,7 +250,15 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
     use ark_ec::{CurveGroup as _, VariableBaseMSM as _};
     use ark_ff::{BigInt, BigInteger, PrimeField};
 
-    let gs = validate_blob(xs)?;
+    fn u64_from_u8(x: [u8; 32]) -> [u64; 4] {
+        let mut r = [0; 4];
+        for i in 0..4 {
+            r[i] = u64::from_le_bytes(x[i * 8..(i + 1) * 8].try_into().unwrap());
+        }
+        r
+    }
+
+    let i = validate_blob(xs)?;
 
     let es = xs
         .chunks(CHUNK_SIZE)
@@ -262,14 +271,17 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         })
         .collect::<Vec<_>>();
 
-    let gs = gs
+    let gs = points::G1_EVALS_U8_LE[i]
         .iter()
         // IMPORTANT: Ensure we match the length of the input data.
         .take(es.len())
-        .map(|x| {
+        .map(|xy: &[u8; 64]| {
+            let (x, y) = xy.split_at(32);
+            let x = u64_from_u8(x.try_into().unwrap());
+            let y = u64_from_u8(y.try_into().unwrap());
             let g = G1Affine::new(
-                Fq::from_bigint(BigInt::new(x[..4].try_into().unwrap())).unwrap(),
-                Fq::from_bigint(BigInt::new(x[4..].try_into().unwrap())).unwrap(),
+                Fq::from_bigint(BigInt::new(x)).unwrap(),
+                Fq::from_bigint(BigInt::new(y)).unwrap(),
             );
             assert!(g.is_on_curve());
             g
