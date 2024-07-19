@@ -320,6 +320,93 @@ mod tests {
     use proptest::collection::vec;
     use proptest::prelude::*;
 
+    /// Computes a commitment using `rust-kzg-bn254`.
+    ///
+    /// Used to compare our implementation against the official one provided
+    /// by EigenDA.
+    fn commit_eigen(xs: &[u8]) -> Result<[u8; 64], Box<dyn std::error::Error>> {
+        use ark_ec::AffineRepr as _;
+        use ark_ff::{BigInteger as _, PrimeField as _};
+        use std::sync::OnceLock;
+
+        static MEMO: OnceLock<rust_kzg_bn254::kzg::Kzg> = OnceLock::new();
+        let kzg = MEMO.get_or_init(|| {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("points");
+            let g1 = root.join("g1.point");
+            let g2 = root.join("g2.point.powerOf2");
+            if !g1.exists() || !g2.exists() {
+                panic!("`points/g1.point` or `points/g2.point.powerOf2` missing, see readme");
+            }
+            rust_kzg_bn254::kzg::Kzg::setup(
+                g1.to_str().unwrap(),
+                "",
+                g2.to_str().unwrap(),
+                268435456,
+                131072,
+            )
+            .unwrap()
+        });
+        let poly = {
+            let mut blob = rust_kzg_bn254::blob::Blob::new(xs.to_vec());
+            blob.pad_data().unwrap();
+            blob.to_polynomial(rust_kzg_bn254::polynomial::PolynomialFormat::InCoefficientForm)?
+        };
+        let c = kzg.commit(&poly)?;
+        let Some((x, y)) = c.xy() else {
+            return Ok([0; 64]);
+        };
+        let x = x.into_bigint().to_bytes_le();
+        let y = y.into_bigint().to_bytes_le();
+        Ok([x, y].concat().try_into().unwrap())
+    }
+
+    #[test]
+    fn commit_empty() {
+        assert_eq!(commit(&[]), Err(CommitError::Empty));
+        assert!(commit_eigen(&[]).is_err());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn commit_too_large(xs in vec(any::<u8>(), MAX_BLOB_SIZE + 1..MAX_BLOB_SIZE * 2)) {
+            prop_assert_eq!(commit(&xs), Err(CommitError::TooLarge));
+            prop_assert!(commit_eigen(&xs).is_err());
+        }
+
+        #[test]
+        fn commit_zeroes(xs in vec(0u8..=0, 1..=MAX_BLOB_SIZE)) {
+            prop_assert_eq!(commit(&xs).unwrap(), [0; 64]);
+            prop_assert_eq!(commit_eigen(&xs).unwrap(), [0; 64]);
+        }
+
+        #[test]
+        fn commit_largest(xs in vec(any::<u8>(), MAX_BLOB_SIZE)) {
+            let expected = commit_eigen(&xs).unwrap();
+            prop_assert_eq!(commit(&xs).unwrap(), expected);
+        }
+
+        #[test]
+        fn commit_random(xs in vec(any::<u8>(), 1..=MAX_BLOB_SIZE)) {
+            let expected = commit_eigen(&xs).unwrap();
+            prop_assert_eq!(commit(&xs).unwrap(), expected);
+        }
+
+        #[test]
+        fn commit_trailing_zeroes(
+            xs in (1..=MAX_BLOB_SIZE)
+                .prop_flat_map(|len| (Just(len), vec(any::<u8>(), 0..len)))
+                .prop_map(|(len, mut xs)| {
+                    xs.extend_from_slice(&vec![0; len - xs.len()]);
+                    xs
+                })
+        ) {
+            let expected = commit_eigen(&xs).unwrap();
+            prop_assert_eq!(commit(&xs).unwrap(), expected);
+        }
+    }
+
     #[test]
     fn canonical_enc_dec_empty() {
         let enc = canonical_encode(&[]);
