@@ -306,7 +306,6 @@ dependencies = [
  "ark-ec",
  "ark-ff",
  "ark-std",
- "sp1-zkvm",
 ]
 
 [[package]]

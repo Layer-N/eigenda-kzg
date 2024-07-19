@@ -1289,7 +1289,6 @@ dependencies = [
  "ark-ec",
  "ark-ff 0.4.2",
  "ark-std 0.4.0",
- "sp1-zkvm",
 ]
 
 [[package]]
@@ -1320,7 +1319,6 @@ dependencies = [
  "rand_core",
  "sec1",
  "subtle",
- "tap",
  "zeroize",
 ]
 
@@ -4624,23 +4622,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sp1-precompiles"
-version = "0.1.0"
-source = "git+https://github.com/succinctlabs/sp1.git?branch=main#14eb569d41d24721ffbd407d6060e202482d659c"
-dependencies = [
- "anyhow",
- "bincode",
- "cfg-if",
- "getrandom",
- "hex",
- "k256",
- "num",
- "rand",
- "serde",
- "snowbridge-amcl",
-]
-
-[[package]]
 name = "sp1-primitives"
 version = "0.1.0"
 source = "git+https://github.com/succinctlabs/sp1.git?branch=main#14eb569d41d24721ffbd407d6060e202482d659c"
@@ -4878,24 +4859,6 @@ dependencies = [
  "tracing",
  "twirp",
  "vergen",
-]
-
-[[package]]
-name = "sp1-zkvm"
-version = "0.1.0"
-source = "git+https://github.com/succinctlabs/sp1.git?branch=main#14eb569d41d24721ffbd407d6060e202482d659c"
-dependencies = [
- "bincode",
- "cfg-if",
- "getrandom",
- "k256",
- "lazy_static",
- "libm",
- "once_cell",
- "rand",
- "serde",
- "sha2",
- "sp1-precompiles",
 ]
 
 [[package]]

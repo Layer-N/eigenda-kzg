@@ -249,6 +249,7 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
     use ark_ec::AffineRepr;
     use ark_ec::{CurveGroup as _, VariableBaseMSM as _};
     use ark_ff::{BigInt, BigInteger, PrimeField};
+    use std::sync::OnceLock;
 
     fn u64_from_u8(x: [u8; 32]) -> [u64; 4] {
         let mut r = [0; 4];
@@ -258,7 +259,31 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         r
     }
 
+    // Used only as an initializer.
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: OnceLock<&'static [G1Affine]> = OnceLock::new();
+    const LEN: usize = points::G1_EVALS_U8_LE.len();
+    static MEMO: [OnceLock<&'static [G1Affine]>; LEN] = [INIT; LEN];
+
     let i = validate_blob(xs)?;
+    let gs = MEMO[i].get_or_init(|| {
+        let gs = points::G1_EVALS_U8_LE[i]
+            .iter()
+            .map(|xy: &[u8; 64]| {
+                let (x, y) = xy.split_at(32);
+                let x = u64_from_u8(x.try_into().unwrap());
+                let y = u64_from_u8(y.try_into().unwrap());
+                let g = G1Affine::new(
+                    Fq::from_bigint(BigInt::new(x)).unwrap(),
+                    Fq::from_bigint(BigInt::new(y)).unwrap(),
+                );
+                assert!(g.is_on_curve());
+                g
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Box::leak(gs)
+    });
 
     let es = xs
         .chunks(CHUNK_SIZE)
@@ -271,27 +296,9 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         })
         .collect::<Vec<_>>();
 
-    let gs = points::G1_EVALS_U8_LE[i]
-        .iter()
-        // IMPORTANT: Ensure we match the length of the input data.
-        .take(es.len())
-        .map(|xy: &[u8; 64]| {
-            let (x, y) = xy.split_at(32);
-            let x = u64_from_u8(x.try_into().unwrap());
-            let y = u64_from_u8(y.try_into().unwrap());
-            let g = G1Affine::new(
-                Fq::from_bigint(BigInt::new(x)).unwrap(),
-                Fq::from_bigint(BigInt::new(y)).unwrap(),
-            );
-            assert!(g.is_on_curve());
-            g
-        })
-        .collect::<Vec<_>>();
-
-    let len = gs.len().min(es.len());
-    let gs = &gs[..len];
-    let es = &es[..len];
-    let c = G1Projective::msm(gs, es).unwrap().into_affine();
+    assert!(es.len() <= gs.len());
+    let gs = &gs[..es.len()];
+    let c = G1Projective::msm(gs, &es).unwrap().into_affine();
     let Some((x, y)) = c.xy() else {
         return Ok(None);
     };
