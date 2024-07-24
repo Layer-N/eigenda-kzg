@@ -191,8 +191,8 @@ fn msm_zkvm(gs: &[[u64; 8]], xs: &[u8]) -> Option<[u8; 64]> {
     // SAFETY: Per assertions above.
     let gs: &[[u32; 16]] = unsafe { &*(gs as *const _ as *const _) };
     let es = xs.chunks(CHUNK_SIZE).map(|x| {
-        let mut buf = [0; ELEM_SIZE];
-        buf[..x.len()].copy_from_slice(x);
+        let mut buf = [0; CHUNK_SIZE];
+        buf[1..x.len() + 1].copy_from_slice(x);
         buf
     });
     let mut r: Option<[u32; 16]> = None;
