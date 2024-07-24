@@ -77,7 +77,8 @@ pub fn canonical_encode(xs: &[u8]) -> Vec<u8> {
 /// data, without actually serializing it. For example, if you need to validate
 /// the length returned by the disperser.
 pub fn canonical_encode_len(xs: &[u8]) -> usize {
-    xs.len() + xs.len().div_ceil(CHUNK_SIZE)
+    let padded_len = xs.len() + xs.len().div_ceil(CHUNK_SIZE);
+    padded_len.div_ceil(32)
 }
 
 /// Deserializes a blob of data serialized per the [blob serialization requirements].
@@ -256,9 +257,8 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         .map(|x| {
             let mut buf = [0; CHUNK_SIZE];
             buf[..x.len()].copy_from_slice(x);
-            buf.reverse();
             // `be` variant seems to internally allocate.
-            Fr::from_le_bytes_mod_order(&buf)
+            Fr::from_be_bytes_mod_order(&buf)
         })
         .collect::<Vec<_>>();
 
