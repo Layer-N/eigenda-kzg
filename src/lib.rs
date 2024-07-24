@@ -78,7 +78,7 @@ pub fn canonical_encode(xs: &[u8]) -> Vec<u8> {
 /// the length returned by the disperser.
 pub fn canonical_encode_len(xs: &[u8]) -> usize {
     let padded_len = xs.len() + xs.len().div_ceil(CHUNK_SIZE);
-    padded_len.div_ceil(32)
+    padded_len.div_ceil(CHUNK_SIZE)
 }
 
 /// Deserializes a blob of data serialized per the [blob serialization requirements].
@@ -191,7 +191,7 @@ fn msm_zkvm(gs: &[[u64; 8]], xs: &[u8]) -> Option<[u8; 64]> {
     // SAFETY: Per assertions above.
     let gs: &[[u32; 16]] = unsafe { &*(gs as *const _ as *const _) };
     let es = xs.chunks(CHUNK_SIZE).map(|x| {
-        let mut buf = [0; CHUNK_SIZE];
+        let mut buf = [0; ELEM_SIZE];
         buf[..x.len()].copy_from_slice(x);
         buf
     });
@@ -257,8 +257,9 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         .map(|x| {
             let mut buf = [0; CHUNK_SIZE];
             buf[..x.len()].copy_from_slice(x);
+            buf.reverse();
             // `be` variant seems to internally allocate.
-            Fr::from_be_bytes_mod_order(&buf)
+            Fr::from_le_bytes_mod_order(&buf)
         })
         .collect::<Vec<_>>();
 
