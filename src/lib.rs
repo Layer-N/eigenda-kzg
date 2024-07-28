@@ -7,7 +7,7 @@ const ELEM_SIZE: usize = 32;
 const CHUNK_SIZE: usize = ELEM_SIZE - 1;
 
 /// Blobs larger than this size return an error.
-pub const MAX_BLOB_SIZE: usize = points::G1_COEFF_U8_LE.len() * CHUNK_SIZE;
+pub const MAX_BLOB_SIZE: usize = points::G1_COEFF_MONT_U8_LE.len() * CHUNK_SIZE;
 
 /// Computes the commitment of a blob of data.
 ///
@@ -229,7 +229,7 @@ fn validate_blob(xs: &[u8]) -> Result<(), CommitError> {
 #[inline]
 fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
     validate_blob(xs)?;
-    Ok(msm_zkvm(points::G1_COEFF_U32_LE, xs))
+    Ok(msm_zkvm(points::G1_COEFF_STD_U32_LE, xs))
 }
 
 #[cfg(not(all(
@@ -243,38 +243,40 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
     use ark_ec::AffineRepr;
     use ark_ec::{CurveGroup as _, VariableBaseMSM as _};
     use ark_ff::{BigInt, BigInteger, PrimeField};
-    use std::sync::OnceLock;
 
-    fn u64_from_u8(x: [u8; 32]) -> [u64; 4] {
+    const LEN: usize = points::G1_COEFF_MONT_U8_LE.len();
+
+    #[allow(long_running_const_eval)]
+    const fn u8_to_u64(x: [u8; 32]) -> [u64; 4] {
+        let x = unsafe { std::mem::transmute::<_, [[u8; 8]; 4]>(x) };
         let mut r = [0; 4];
-        for i in 0..4 {
-            r[i] = u64::from_le_bytes(x[i * 8..(i + 1) * 8].try_into().unwrap());
+        let mut i = 0;
+        while i < 4 {
+            r[i] = u64::from_le_bytes(x[i]);
+            i += 1;
         }
         r
     }
 
+    #[allow(long_running_const_eval)]
+    const G1_COEFF: [G1Affine; LEN] = {
+        let mut r = [G1Affine::identity(); LEN];
+        let mut i = 0;
+        while i < LEN {
+            let [x, y] = points::G1_COEFF_MONT_U8_LE[i];
+            let x = u8_to_u64(x);
+            let y = u8_to_u64(y);
+            let g = G1Affine::new_unchecked(
+                Fq::new_unchecked(BigInt::new(x)),
+                Fq::new_unchecked(BigInt::new(y)),
+            );
+            r[i] = g;
+            i += 1;
+        }
+        r
+    };
+
     validate_blob(xs)?;
-
-    static MEMO: OnceLock<&'static [G1Affine]> = OnceLock::new();
-
-    let gs = MEMO.get_or_init(|| {
-        let gs = points::G1_COEFF_U8_LE
-            .iter()
-            .map(|xy: &[u8; 64]| {
-                let (x, y) = xy.split_at(32);
-                let x = u64_from_u8(x.try_into().unwrap());
-                let y = u64_from_u8(y.try_into().unwrap());
-                let g = G1Affine::new(
-                    Fq::from_bigint(BigInt::new(x)).unwrap(),
-                    Fq::from_bigint(BigInt::new(y)).unwrap(),
-                );
-                assert!(g.is_on_curve());
-                g
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Box::leak(gs)
-    });
 
     let es = xs
         .chunks(CHUNK_SIZE)
@@ -287,8 +289,8 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         })
         .collect::<Vec<_>>();
 
-    assert!(es.len() <= gs.len());
-    let gs = &gs[..es.len()];
+    assert!(es.len() <= G1_COEFF.len());
+    let gs = &G1_COEFF[..es.len()];
     let c = G1Projective::msm(gs, &es).unwrap().into_affine();
     let Some((x, y)) = c.xy() else {
         return Ok(None);
