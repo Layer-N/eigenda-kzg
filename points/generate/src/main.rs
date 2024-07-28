@@ -2,7 +2,6 @@
 
 use ark_ec::AffineRepr as _;
 use ark_ff::{BigInteger as _, PrimeField as _};
-use rayon::iter::{IntoParallelIterator, ParallelIterator as _};
 use std::io::Write as _;
 use std::path::Path;
 
@@ -26,25 +25,18 @@ fn main() -> std::io::Result<()> {
     )
     .unwrap();
 
-    // 131072 = 2^17
-    let iffts = (0..=17)
-        .into_par_iter()
-        .map(|i| (i, kzg.g1_ifft(1 << i).unwrap()))
-        .collect::<Vec<_>>();
+    let gs = kzg.get_g1_points();
+    let mut f = std::fs::File::create_new(root.join(format!("g1_coeff.bin")))?;
 
-    for (i, gs) in iffts {
-        let mut f = std::fs::File::create_new(root.join(format!("g1_ifft_{:02}.bin", i)))?;
-
-        for g in gs {
-            assert!(!g.is_zero());
-            let (x, y) = g.xy().unwrap();
-            let x = x.into_bigint().to_bytes_le();
-            let y = y.into_bigint().to_bytes_le();
-            assert_eq!(x.len(), 32);
-            assert_eq!(y.len(), 32);
-            f.write_all(&x)?;
-            f.write_all(&y)?;
-        }
+    for g in gs {
+        assert!(!g.is_zero());
+        let (x, y) = g.xy().unwrap();
+        let x = x.into_bigint().to_bytes_le();
+        let y = y.into_bigint().to_bytes_le();
+        assert_eq!(x.len(), 32);
+        assert_eq!(y.len(), 32);
+        f.write_all(&x)?;
+        f.write_all(&y)?;
     }
 
     Ok(())

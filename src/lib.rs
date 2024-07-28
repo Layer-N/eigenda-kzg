@@ -7,8 +7,7 @@ const ELEM_SIZE: usize = 32;
 const CHUNK_SIZE: usize = ELEM_SIZE - 1;
 
 /// Blobs larger than this size return an error.
-pub const MAX_BLOB_SIZE: usize =
-    points::G1_EVALS_U8_LE[points::G1_EVALS_U8_LE.len() - 1].len() * CHUNK_SIZE;
+pub const MAX_BLOB_SIZE: usize = points::G1_COEFF_U8_LE.len() * CHUNK_SIZE;
 
 /// Computes the commitment of a blob of data.
 ///
@@ -209,8 +208,8 @@ fn msm_zkvm(gs: &[[u32; 16]], xs: &[u8]) -> Option<[u8; 64]> {
     Some(unsafe { std::mem::transmute(r?) })
 }
 
-/// Validates blob size, returning the appropriate index of `points::G1_EVALS`.
-fn validate_blob(xs: &[u8]) -> Result<usize, CommitError> {
+/// Validates blob size, ensuring it's within bounds of maximum number of G1 points.
+fn validate_blob(xs: &[u8]) -> Result<(), CommitError> {
     if xs.is_empty() {
         return Err(CommitError::Empty);
     }
@@ -219,13 +218,7 @@ fn validate_blob(xs: &[u8]) -> Result<usize, CommitError> {
         return Err(CommitError::TooLarge);
     }
 
-    let l = xs
-        .len()
-        .div_ceil(CHUNK_SIZE)
-        .next_power_of_two()
-        .trailing_zeros() as usize;
-
-    Ok(l)
+    Ok(())
 }
 
 #[cfg(all(
@@ -235,7 +228,8 @@ fn validate_blob(xs: &[u8]) -> Result<usize, CommitError> {
 ))]
 #[inline]
 fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
-    Ok(msm_zkvm(points::G1_EVALS_U32_LE[validate_blob(xs)?], xs))
+    validate_blob(xs)?;
+    Ok(msm_zkvm(points::G1_COEFF_U32_LE, xs))
 }
 
 #[cfg(not(all(
@@ -259,15 +253,12 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         r
     }
 
-    // Used only as an initializer.
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: OnceLock<&'static [G1Affine]> = OnceLock::new();
-    const LEN: usize = points::G1_EVALS_U8_LE.len();
-    static MEMO: [OnceLock<&'static [G1Affine]>; LEN] = [INIT; LEN];
+    validate_blob(xs)?;
 
-    let i = validate_blob(xs)?;
-    let gs = MEMO[i].get_or_init(|| {
-        let gs = points::G1_EVALS_U8_LE[i]
+    static MEMO: OnceLock<&'static [G1Affine]> = OnceLock::new();
+
+    let gs = MEMO.get_or_init(|| {
+        let gs = points::G1_COEFF_U8_LE
             .iter()
             .map(|xy: &[u8; 64]| {
                 let (x, y) = xy.split_at(32);
@@ -319,6 +310,27 @@ mod tests {
     use super::*;
     use proptest::collection::vec;
     use proptest::prelude::*;
+
+    const SAMPLES_DIR: &str = "samples";
+
+    #[test]
+    fn test_samples() {
+        for entry in std::fs::read_dir(SAMPLES_DIR).unwrap() {
+            let path = entry.unwrap().path();
+
+            if path.extension().unwrap() == "commit" {
+                continue;
+            }
+
+            assert_eq!(path.extension().unwrap(), "data");
+
+            let data = std::fs::read(&path).unwrap();
+            let expect = std::fs::read(path.with_extension("commit")).unwrap();
+            let expect = <[u8; 64]>::try_from(expect).unwrap();
+
+            assert_eq!(commit(&data).unwrap(), expect);
+        }
+    }
 
     #[test]
     fn canonical_enc_dec_empty() {
