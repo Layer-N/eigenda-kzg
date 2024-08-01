@@ -32,6 +32,15 @@ fn samples() {
 }
 
 #[test]
-fn test_empty() {
+fn empty() {
     assert_eq!(commit_sp1(&[]).unwrap(), commit_native(&[]).unwrap());
+}
+
+#[test]
+fn too_large() {
+    let xs = vec![1; eigenda_kzg::MAX_BLOB_SIZE + 1];
+    assert!(commit_sp1(&xs).is_err());
+    assert!(commit_native(&xs).is_err());
+    let xs = vec![1; eigenda_kzg::MAX_BLOB_SIZE];
+    assert_eq!(commit_sp1(&xs).unwrap(), commit_native(&xs).unwrap());
 }
