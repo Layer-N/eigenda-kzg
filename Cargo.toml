@@ -7,11 +7,14 @@ authors = ["Sheheryar Parvaz <me@cherryman.org>"]
 [dependencies]
 
 [dev-dependencies]
-kzgpad-rs = { git = "https://github.com/Layr-Labs/kzgpad-rs.git" }
 proptest = "1.5.0"
+rust-kzg-bn254 = { git = "https://github.com/cherryman/rust-kzg-bn254.git" }
 
 [target.'cfg(not(all(target_os = "zkvm", target_vendor = "succinct", target_arch = "riscv32")))'.dependencies]
 ark-bn254 = "0.4.0"
 ark-ec = "0.4.2"
 ark-ff = "0.4.2"
 ark-std = "0.4.0"
+
+[profile.test]
+inherits = "release"

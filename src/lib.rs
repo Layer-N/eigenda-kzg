@@ -1,3 +1,17 @@
+//! Prover-friendly KZG commitments on BN254.
+//!
+//! ```rust
+//! # let data = &[1, 2, 3, 4];
+//! #
+//! # fn disperse(data: &[u8]) -> [u8; 64] {
+//! #     eigenda_kzg::commit(&eigenda_kzg::decode_delimited(data).unwrap()).unwrap()
+//! # }
+//! let actual = disperse(&eigenda_kzg::encode_delimited(data));
+//! let expected = eigenda_kzg::commit(data).unwrap();
+//!
+//! assert_eq!(actual, expected);
+//! ```
+
 mod points;
 
 // Bytes in a scalar.
@@ -7,144 +21,202 @@ const ELEM_SIZE: usize = 32;
 const CHUNK_SIZE: usize = ELEM_SIZE - 1;
 
 /// Blobs larger than this size return an error.
-pub const MAX_BLOB_SIZE: usize = points::G1_COEFF_MONT_U8_LE.len() * CHUNK_SIZE;
+// -1 to account for sentinel.
+pub const MAX_BLOB_SIZE: usize = points::G1_COEFF_MONT_U8_LE.len() * CHUNK_SIZE - 1;
 
-/// Computes the commitment of a blob of data.
+/// The sentinel appended to the end of the array prior to committing.
 ///
-/// You **do not** need to call [`canonical_encode`], as this function already
-/// inserts padding as per EigenDA's [blob serialization requirements]. If you
-/// need to compute the commitment to a blob of data that is already serialized,
-/// use [`canonical_decode`] to deserialize it first.
+/// This and adding the appropriate padding is already handled by [`commit`].
+pub const SENTINEL: u8 = 1;
+const _: () = assert!(SENTINEL != 0);
+
+/// Computes the commitment of the given data.
 ///
-/// Zero-length blobs and blobs larger than [`MAX_BLOB_SIZE`] return an error.
-/// All other blobs return a valid 64-byte commitment.
+/// You **do not** need to call [`encode_delimited`], as this function already
+/// appends the sentinel and inserts padding. If you need to compute the commitment
+/// to a blob of data that is already serialized, use [`decode_delimited`] to
+/// deserialize it first.
+///
+/// Blobs larger than [`MAX_BLOB_SIZE`] return an error. All other blobs return a
+/// valid, non-zero 64-byte commitment.
 ///
 /// The commitment is a G1 point on the BN254 curve, serialized as a
 /// 64-byte array of little-endian bytes. The first 32 bytes correspond
 /// to the x-coordinate, and the latter 32-bytes correspond to the
-/// y-coordinate. The identity is serialized as 64 zero bytes.
-///
-/// [blob serialization requirements]: https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements
-pub fn commit(xs: &[u8]) -> Result<[u8; 64], CommitError> {
-    commit_(xs).map(|x| x.unwrap_or([0; 64]))
+/// y-coordinate. The identity is never serialized.
+pub fn commit(data: &[u8]) -> Result<[u8; 64], CommitError> {
+    if data.len() > MAX_BLOB_SIZE {
+        return Err(CommitError {});
+    }
+
+    Ok(commit_(data))
 }
 
-/// Possible errors returned by [`commit`].
+/// Error returned by [`commit`].
 ///
-/// This only happens if the blob length is out of range. If
-/// the blob has length within `1..=MAX_BLOB_SIZE`, [`commit`]
-/// will always return ok.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum CommitError {
-    Empty,
-    TooLarge,
-}
+/// This only happens if the blob is too large. If the blob has length less
+/// than or equal to [`MAX_BLOB_SIZE`], [`commit`] will always return ok.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CommitError {}
 
 impl std::fmt::Display for CommitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CommitError::Empty => write!(f, "blob is empty"),
-            CommitError::TooLarge => write!(f, "blob is too large"),
-        }
+        write!(f, "blob is too large")
     }
 }
 
 impl std::error::Error for CommitError {}
 
-/// Serializes a blob of data per the [blob serialization requirements].
+/// Splits the slice into a slice of N-element arrays, starting at the beginning of the slice, and
+/// a remainder slice with length strictly less than N.
+///
+/// Taken from unstable feature [`array_chunks`]. Can be removed when the feature lands.
+///
+/// [`array_chunks`]: <https://github.com/rust-lang/rust/issues/74985>
+const fn as_chunks<const N: usize>(xs: &[u8]) -> (&[[u8; N]], &[u8]) {
+    assert!(N != 0);
+    let (head, remainder) = xs.split_at(xs.len() / N * N);
+    assert!(head.len() % N == 0);
+    let new_len = head.len() / N;
+    let array_slice = unsafe { std::slice::from_raw_parts(head.as_ptr().cast(), new_len) };
+    (array_slice, remainder)
+}
+
+/// Returns the length of the blob that would be serialized by [`encode_delimited`].
+///
+/// This function is useful if you only need to know the length of the serialized
+/// data without actually serializing it. For example, if you need to validate
+/// the length returned by the disperser.
+///
+/// This is guaranteed to be a multiple of 32.
+pub fn encode_delimited_len(data_len: usize) -> usize {
+    data_len
+        .checked_add(1)
+        .unwrap()
+        .div_ceil(CHUNK_SIZE)
+        .checked_mul(ELEM_SIZE)
+        .unwrap()
+}
+
+/// Serializes a blob of data to sentinel-delimited encoding.
+///
+/// This is similar to EigenDA's [`kzgpad`] format, but with a sentinel
+/// appended to the end of the blob prior to encoding. The sentinel is
+/// necessary for the original data to be recoverable when the data
+/// is zero-padded to a 32-byte boundary.
 ///
 /// This function **does not** need to be called before [`commit`]
-/// as [`commit`] already internally serializes the blob.
+/// as [`commit`] already internally serializes the blob with this
+/// format.
 ///
-/// [blob serialization requirements]: https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements
-pub fn canonical_encode(xs: &[u8]) -> Vec<u8> {
-    let mut r = Vec::with_capacity(canonical_encode_len(xs));
-    let mut c = xs.chunks_exact(CHUNK_SIZE);
+/// This function is meant to be used when you need to serialize the
+/// data prior to sending it to the disperser. Otherwise, the data
+/// itself should be used directly with [`commit`].
+///
+/// [`kzgpad`]: https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements
+pub fn encode_delimited(data: &[u8]) -> Vec<u8> {
+    let l = encode_delimited_len(data.len());
+    let (xs, x) = as_chunks::<CHUNK_SIZE>(data);
+    let mut r = Vec::with_capacity(l);
 
-    for x in &mut c {
+    for x in xs {
         r.push(0);
         r.extend_from_slice(x);
     }
 
-    if !c.remainder().is_empty() {
-        r.push(0);
-        r.extend_from_slice(c.remainder());
-    }
+    assert!(x.len() < CHUNK_SIZE);
+    r.push(0);
+    r.extend_from_slice(x);
+    r.push(SENTINEL);
+    r.resize(r.len().div_ceil(ELEM_SIZE) * ELEM_SIZE, 0);
+
+    assert!(r.len() == l);
+    assert!(r.len() % ELEM_SIZE == 0);
 
     r
 }
 
-/// Returns the length of the blob that would be serialized by [`canonical_encode`].
-///
-/// This function is useful if you only need to know the length of the serialized
-/// data, without actually serializing it. For example, if you need to validate
-/// the length returned by the disperser.
-pub fn canonical_encode_len(xs: &[u8]) -> usize {
-    xs.len() + xs.len().div_ceil(CHUNK_SIZE)
-}
-
-/// Deserializes a blob of data serialized per the [blob serialization requirements].
+/// Deserializes a blob of data serialized from sentinel-delimited encoding.
 ///
 /// This function returns an error if the input is not serialized correctly. Is the
-/// inverse of [`canonical_encode`]. Note that the conversion is lossless, i.e. the
+/// inverse of [`encode_delimited`]. Note that the conversion is lossless, i.e. the
 /// original data is returned.
 ///
-/// [blob serialization requirements]: https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements
-pub fn canonical_decode(xs: &[u8]) -> Result<Vec<u8>, DecodeError> {
-    let mut r = Vec::with_capacity(xs.len() - xs.len().div_ceil(ELEM_SIZE));
-    let mut c = xs.chunks_exact(ELEM_SIZE);
-    let mut i = 0;
+/// The requirements for the input are:
+///
+/// - The length must be non-zero.
+/// - The length must be a multiple of 32.
+/// - The last non-zero byte must be [`SENTINEL`] and in the last 32-byte chunk.
+/// - Every 32-byte chunk must have the first byte as zero.
+pub fn decode_delimited(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    // This funky destructuring validates the length.
+    let ([xs @ .., x], []) = as_chunks::<ELEM_SIZE>(data) else {
+        return Err(DecodeError::InvalidLength);
+    };
 
-    for x in &mut c {
-        if x[0] != 0 {
-            return Err(DecodeError::MissingPadding(i));
-        }
+    let sentinel = x
+        .iter()
+        .rposition(|c| *c != 0)
+        .ok_or(DecodeError::MissingSentinel)?;
 
-        i += ELEM_SIZE;
-        r.extend_from_slice(&x[1..]);
+    if x[sentinel] != SENTINEL {
+        return Err(DecodeError::InvalidSentinel);
     }
 
-    if !c.remainder().is_empty() {
-        if c.remainder().len() == 1 {
-            return Err(DecodeError::ExtraByte);
+    assert!(sentinel > 0);
+
+    // -1 deals with the 0 byte in the last chunk.
+    let l = CHUNK_SIZE * xs.len() + sentinel - 1;
+    let mut r = Vec::with_capacity(l);
+
+    for (i, c) in xs.iter().enumerate() {
+        if c[0] != 0 {
+            return Err(DecodeError::MissingPadding(i * ELEM_SIZE));
         }
 
-        if c.remainder()[0] != 0 {
-            return Err(DecodeError::MissingPadding(i));
-        }
-
-        r.extend_from_slice(&c.remainder()[1..]);
+        r.extend_from_slice(&c[1..]);
     }
 
+    if x[0] != 0 {
+        return Err(DecodeError::MissingPadding(xs.len() * ELEM_SIZE));
+    }
+
+    r.extend_from_slice(&x[1..sentinel]);
+    assert!(r.len() == l);
     Ok(r)
 }
 
-/// Possible errors returned by [`canonical_decode`].
+/// Error returned by [`decode_delimited`].
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum DecodeError {
     /// The byte at `.0` is not zero.
     MissingPadding(usize),
-    /// The last 32 byte chunk has a single byte.
-    ExtraByte,
+    /// The last 32 byte chunk is missing the sentinel.
+    MissingSentinel,
+    /// Length is not a multiple of 32.
+    InvalidLength,
+    /// Sentinel is not [`SENTINEL`].
+    InvalidSentinel,
 }
 
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DecodeError::MissingPadding(i) => write!(f, "invalid non-zero byte at {}", i),
-            DecodeError::ExtraByte => write!(f, "extra byte in last chunk"),
+            DecodeError::MissingSentinel => write!(f, "missing sentinel"),
+            DecodeError::InvalidLength => write!(f, "length not a multiple of 32"),
+            DecodeError::InvalidSentinel => write!(f, "sentinel is not {}", SENTINEL),
         }
     }
 }
 
 impl std::error::Error for DecodeError {}
 
-#[cfg(all(
-    target_os = "zkvm",
-    target_vendor = "succinct",
-    target_arch = "riscv32"
-))]
-fn msm_zkvm(gs: &[[u32; 16]], xs: &[u8]) -> Option<[u8; 64]> {
+/// Computes the commitment, panicking if the blob is too large.
+#[cfg(all(target_os = "zkvm", target_vendor = "succinct"))]
+#[inline]
+fn commit_(xs: &[u8]) -> [u8; 64] {
     #![allow(clippy::assertions_on_constants)]
     use std::mem::{align_of, size_of};
 
@@ -183,19 +255,23 @@ fn msm_zkvm(gs: &[[u32; 16]], xs: &[u8]) -> Option<[u8; 64]> {
         r
     }
 
-    let es = xs.chunks(CHUNK_SIZE).map(|x| {
-        let mut buf = [0; CHUNK_SIZE];
-        buf[..x.len()].copy_from_slice(x);
-        buf
-    });
-    let mut r: Option<[u32; 16]> = None;
+    assert!(xs.len() <= MAX_BLOB_SIZE);
+    let gs = points::G1_COEFF_STD_U32_LE;
+    let (xs, x) = as_chunks::<CHUNK_SIZE>(xs);
 
-    for (g, e) in gs.iter().zip(es) {
-        if let Some(g) = bn254_mul(g, &e) {
-            match &mut r {
-                Some(r) => bn254_add(r, &g),
-                None => r = Some(g),
-            }
+    // Do the last element first, as we know it is non-zero
+    // thanks to the sentinel being non-zero. This avoids the
+    // need to track if `r` is zero.
+    let mut r: [u32; 16] = {
+        let mut e = [0; CHUNK_SIZE];
+        e[..x.len()].copy_from_slice(x);
+        e[x.len()] = SENTINEL;
+        bn254_mul(&gs[xs.len()], &e).unwrap()
+    };
+
+    for (g, e) in gs.iter().zip(xs) {
+        if let Some(g) = bn254_mul(g, e) {
+            bn254_add(&mut r, &g);
         }
     }
 
@@ -205,46 +281,17 @@ fn msm_zkvm(gs: &[[u32; 16]], xs: &[u8]) -> Option<[u8; 64]> {
     const _: () = assert!(align_of::<[u32; 16]>() >= align_of::<[u8; 64]>());
 
     // SAFETY: Per const assertions above.
-    Some(unsafe { std::mem::transmute(r?) })
+    unsafe { std::mem::transmute(r) }
 }
 
-/// Validates blob size, ensuring it's within bounds of maximum number of G1 points.
-fn validate_blob(xs: &[u8]) -> Result<(), CommitError> {
-    if xs.is_empty() {
-        return Err(CommitError::Empty);
-    }
-
-    if xs.len() > MAX_BLOB_SIZE {
-        return Err(CommitError::TooLarge);
-    }
-
-    Ok(())
-}
-
-#[cfg(all(
-    target_os = "zkvm",
-    target_vendor = "succinct",
-    target_arch = "riscv32"
-))]
+/// Computes the commitment, panicking if the blob is too large.
+#[cfg(not(all(target_os = "zkvm", target_vendor = "succinct")))]
 #[inline]
-fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
-    validate_blob(xs)?;
-    Ok(msm_zkvm(points::G1_COEFF_STD_U32_LE, xs))
-}
-
-#[cfg(not(all(
-    target_os = "zkvm",
-    target_vendor = "succinct",
-    target_arch = "riscv32"
-)))]
-#[inline]
-fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
+fn commit_(xs: &[u8]) -> [u8; 64] {
     use ark_bn254::{Fq, Fr, G1Affine, G1Projective};
     use ark_ec::AffineRepr;
     use ark_ec::{CurveGroup as _, VariableBaseMSM as _};
     use ark_ff::{BigInt, BigInteger, PrimeField};
-
-    const LEN: usize = points::G1_COEFF_MONT_U8_LE.len();
 
     #[allow(long_running_const_eval)]
     const fn u8_to_u64(x: [u8; 32]) -> [u64; 4] {
@@ -258,8 +305,11 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         r
     }
 
+    const LEN: usize = points::G1_COEFF_MONT_U8_LE.len();
+
+    // `static` to keep stack usage small.
     #[allow(long_running_const_eval)]
-    const G1_COEFF: [G1Affine; LEN] = {
+    static G1_COEFF: &[G1Affine; LEN] = &{
         let mut r = [G1Affine::identity(); LEN];
         let mut i = 0;
         while i < LEN {
@@ -276,25 +326,27 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
         r
     };
 
-    validate_blob(xs)?;
+    assert!(xs.len() <= MAX_BLOB_SIZE);
+    let mut es = Vec::with_capacity(xs.len().div_ceil(CHUNK_SIZE));
+    let (xs, x) = as_chunks::<CHUNK_SIZE>(xs);
 
-    let es = xs
-        .chunks(CHUNK_SIZE)
-        .map(|x| {
-            let mut buf = [0; CHUNK_SIZE];
-            buf[..x.len()].copy_from_slice(x);
-            buf.reverse();
-            // `be` variant seems to internally allocate.
-            Fr::from_le_bytes_mod_order(&buf)
-        })
-        .collect::<Vec<_>>();
+    es.extend(xs.iter().copied().map(|mut buf| {
+        buf.reverse();
+        // `be` variant seems to internally allocate.
+        Fr::from_le_bytes_mod_order(&buf)
+    }));
+
+    assert!(x.len() < MAX_BLOB_SIZE);
+    let mut buf = [0; CHUNK_SIZE];
+    buf[..x.len()].copy_from_slice(x);
+    buf[x.len()] = SENTINEL;
+    buf.reverse();
+    es.push(Fr::from_le_bytes_mod_order(&buf));
 
     assert!(es.len() <= G1_COEFF.len());
     let gs = &G1_COEFF[..es.len()];
     let c = G1Projective::msm(gs, &es).unwrap().into_affine();
-    let Some((x, y)) = c.xy() else {
-        return Ok(None);
-    };
+    let (x, y) = c.xy().expect("should not be zero");
     let x = x.into_bigint().to_bytes_le();
     let y = y.into_bigint().to_bytes_le();
 
@@ -304,7 +356,7 @@ fn commit_(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitError> {
     let mut r = [0u8; 64];
     r[..x.len()].copy_from_slice(&x);
     r[32..y.len() + 32].copy_from_slice(&y);
-    Ok(Some(r))
+    r
 }
 
 #[cfg(test)]
@@ -316,7 +368,88 @@ mod tests {
     const SAMPLES_DIR: &str = "samples";
 
     #[test]
-    fn test_samples() {
+    fn delimited_dec_empty() {
+        assert_eq!(decode_delimited(&[]), Err(DecodeError::InvalidLength));
+    }
+
+    #[test]
+    fn delimited_enc_dec_empty() {
+        let enc = encode_delimited(&[]);
+        let dec = decode_delimited(&enc).unwrap();
+        assert!(dec.is_empty());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4096))]
+
+        #[test]
+        fn delimited_len_valid(len in 1..(usize::MAX / 4)) {
+            let len = encode_delimited_len(len);
+            prop_assert!(len >= ELEM_SIZE);
+            prop_assert!(len % ELEM_SIZE == 0);
+        }
+
+        #[test]
+        fn delimited_enc_dec(xs in vec(any::<u8>(), 0..8192)) {
+            let enc = encode_delimited(&xs);
+            let dec = decode_delimited(&enc).unwrap();
+            prop_assert_eq!(xs, dec);
+        }
+
+        #[test]
+        fn delimited_len(xs in vec(any::<u8>(), 0..8192)) {
+            let enc = encode_delimited(&xs);
+            prop_assert_eq!(enc.len(), encode_delimited_len(xs.len()));
+            prop_assert_eq!(enc.len() % ELEM_SIZE, 0);
+        }
+
+        #[test]
+        fn delimited_dec_err_length(
+            xs in vec(any::<u8>(), 1..8192)
+                .prop_filter(
+                    "Values must not have a length multiple of 32",
+                    |x| x.len() % ELEM_SIZE != 0,
+                )
+        ) {
+            prop_assert_eq!(decode_delimited(&xs), Err(DecodeError::InvalidLength));
+        }
+
+        #[test]
+        fn delimited_dec_err_padding(
+            b in 1u8..,
+            (i, xs) in (1usize..=8192)
+                .prop_flat_map(|len| (0..len, vec(any::<u8>(), len)))
+        ) {
+            let i = i / ELEM_SIZE * ELEM_SIZE;
+            let mut enc = encode_delimited(&xs);
+            enc[i] = b;
+            prop_assert_eq!(decode_delimited(&enc), Err(DecodeError::MissingPadding(i)));
+        }
+
+        #[test]
+        fn delimited_dec_invalid_sentinel(
+            b in (1u8..).prop_filter("Must not be a sentinel", |x| *x != SENTINEL),
+            xs in vec(any::<u8>(), 1usize..=8192)
+        ) {
+            let mut enc = encode_delimited(&xs);
+            let i = enc.iter().rposition(|x| *x == SENTINEL).unwrap();
+            enc[i] = b;
+            prop_assert_eq!(decode_delimited(&enc), Err(DecodeError::InvalidSentinel));
+        }
+
+        #[test]
+        fn delimited_dec_missing_sentinel(xs in vec(any::<u8>(), 1usize..=8192)) {
+            let mut enc = encode_delimited(&xs);
+            let len = enc.len();
+            enc[len - ELEM_SIZE..].copy_from_slice(&[0; ELEM_SIZE]);
+            prop_assert_eq!(decode_delimited(&enc), Err(DecodeError::MissingSentinel));
+        }
+    }
+
+    // These are sampled from EigenDA's API. Used to ensure that
+    // our implementation does not diverge from the reference.
+    #[test]
+    fn samples() {
         for entry in std::fs::read_dir(SAMPLES_DIR).unwrap() {
             let path = entry.unwrap().path();
 
@@ -325,66 +458,86 @@ mod tests {
             }
 
             assert_eq!(path.extension().unwrap(), "data");
-
             let data = std::fs::read(&path).unwrap();
             let expect = std::fs::read(path.with_extension("commit")).unwrap();
             let expect = <[u8; 64]>::try_from(expect).unwrap();
-
             assert_eq!(commit(&data).unwrap(), expect);
         }
     }
 
-    #[test]
-    fn canonical_enc_dec_empty() {
-        let enc = canonical_encode(&[]);
-        let dec = canonical_decode(&enc).unwrap();
-        assert!(enc.is_empty());
-        assert!(dec.is_empty());
+    /// Computes a commitment using `rust-kzg-bn254`, while including
+    /// our custom delimited encoding format.
+    fn commit_eigen(xs: &[u8]) -> Result<[u8; 64], Box<dyn std::error::Error>> {
+        use ark_ec::AffineRepr as _;
+        use ark_ff::{BigInteger as _, PrimeField as _};
+        use std::sync::OnceLock;
+
+        static MEMO: OnceLock<rust_kzg_bn254::kzg::Kzg> = OnceLock::new();
+        let kzg = MEMO.get_or_init(|| {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("points");
+            let g1 = root.join("g1.point");
+            let g2 = root.join("g2.point.powerOf2");
+            if !g1.exists() || !g2.exists() {
+                panic!("`points/g1.point` or `points/g2.point.powerOf2` missing, see readme");
+            }
+            rust_kzg_bn254::kzg::Kzg::setup(
+                g1.to_str().unwrap(),
+                "",
+                g2.to_str().unwrap(),
+                268435456,
+                131072,
+            )
+            .unwrap()
+        });
+        let poly = {
+            // Our encoding is similar to theirs, but with a sentinel.
+            let mut xs = xs.to_vec();
+            xs.push(SENTINEL);
+            let mut blob = rust_kzg_bn254::blob::Blob::new(xs.to_vec());
+            blob.pad_data().unwrap();
+            blob.to_polynomial(rust_kzg_bn254::polynomial::PolynomialFormat::InEvaluationForm)?
+        };
+        let c = kzg.commit(&poly)?;
+        let (x, y) = c.xy().expect("should not be zero");
+        let x = x.into_bigint().to_bytes_le();
+        let y = y.into_bigint().to_bytes_le();
+        Ok([x, y].concat().try_into().unwrap())
     }
 
     proptest! {
-        #[test]
-        fn matches_kzgpad(xs in vec(any::<u8>(), 0..8192)) {
-            let enc = canonical_encode(&xs);
-            let dec = canonical_decode(&enc).unwrap();
+        #![proptest_config(ProptestConfig::with_cases(64))]
 
-            prop_assert_eq!(&enc, &kzgpad_rs::convert_by_padding_empty_byte(&xs));
-            prop_assert_eq!(&dec, &kzgpad_rs::remove_empty_byte_from_padded_bytes(&enc));
+        #[test]
+        fn commit_too_large(xs in vec(any::<u8>(), MAX_BLOB_SIZE + 1..MAX_BLOB_SIZE * 2)) {
+            prop_assert!(commit(&xs).is_err());
         }
 
         #[test]
-        fn canonical_enc_dec(xs in vec(any::<u8>(), 0..8192)) {
-            let enc = canonical_encode(&xs);
-            let dec = canonical_decode(&enc).unwrap();
-            prop_assert_eq!(xs, dec);
+        fn commit_zeroes(xs in vec(0u8..=0, 1..=MAX_BLOB_SIZE)) {
+            prop_assert_eq!(commit(&xs).unwrap(), commit_eigen(&xs).unwrap());
         }
 
         #[test]
-        fn canonical_len(xs in vec(any::<u8>(), 0..8192)) {
-            let enc = canonical_encode(&xs);
-            prop_assert_eq!(enc.len(), canonical_encode_len(&xs));
+        fn commit_largest(xs in vec(any::<u8>(), MAX_BLOB_SIZE)) {
+            prop_assert_eq!(commit(&xs).unwrap(), commit_eigen(&xs).unwrap());
         }
 
         #[test]
-        fn canonical_dec_err_padding(
-            b in 1u8..,
-            (i, xs) in (1usize..=100)
-                .prop_flat_map(|len| (0..len, vec(any::<u8>(), len)))
+        fn commit_random(xs in vec(any::<u8>(), 1..=MAX_BLOB_SIZE)) {
+            prop_assert_eq!(commit(&xs).unwrap(), commit_eigen(&xs).unwrap());
+        }
+
+        #[test]
+        fn commit_trailing_zeroes(
+            xs in (1..=MAX_BLOB_SIZE)
+                .prop_flat_map(|len| (Just(len), vec(any::<u8>(), 0..len)))
+                .prop_map(|(len, mut xs)| {
+                    xs.extend_from_slice(&vec![0; len - xs.len()]);
+                    xs
+                })
         ) {
-            let i = i / ELEM_SIZE * ELEM_SIZE;
-            let mut enc = canonical_encode(&xs);
-            enc[i] = b;
-            prop_assert_eq!(canonical_decode(&enc), Err(DecodeError::MissingPadding(i)));
-        }
-
-        #[test]
-        fn canonical_dec_err_extra_byte(
-            b in 0u8..,
-            xs in (0usize..=20).prop_flat_map(|i| vec(any::<u8>(), i * CHUNK_SIZE))
-        ) {
-            let mut enc = canonical_encode(&xs);
-            enc.push(b);
-            prop_assert_eq!(canonical_decode(&enc), Err(DecodeError::ExtraByte));
+            let expected = commit_eigen(&xs).unwrap();
+            prop_assert_eq!(commit(&xs).unwrap(), expected);
         }
     }
 }

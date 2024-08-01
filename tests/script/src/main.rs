@@ -1,5 +1,8 @@
 //! Simple script for benchmarking cycle count on 64KiB.
 
+#[cfg(test)]
+mod tests;
+
 use sp1_sdk::{ProverClient, SP1Stdin};
 
 /// The ELF we want to execute inside the zkVM.

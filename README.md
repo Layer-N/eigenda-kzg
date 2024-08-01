@@ -1,9 +1,12 @@
-# SP1-friendly EigenDA commitment calculations
+# SP1-friendly KZG commitments on BN254
 
 Provides `eigenda_kzg::commit()` to compute the same commitment that
-EigenDA would compute efficiently in sp1. Note that the payload is
-automatically padded as per the [blob serialization
-requirements](https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements).
+EigenDA would compute efficiently in SP1. Note that the serialization
+format used **diverges from [blob serialization
+requirements](https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements).**.
+Instead, we delimit the data with a sentinel at the end. This has the
+advantage of supporting committing to the empty string and never having
+zero commitments.
 
 ## Developing
 
@@ -13,20 +16,6 @@ setup](https://github.com/Layr-Labs/eigenda-operator-setup) into the
 `points` directory. You should have two files, `points/g1.point` and
 `points/g2.point.powerOf2`.
 
-Tests are run from `tests/script`:
-
-```
-$ cd tests/script
-$ cargo test
-```
-
-Be warned though, they are computationally quite expensive. You may want
-to run them on a beefier machine. The number of threads can be
-controlled by setting the environment variable `RAYON_NUM_THREADS`. You
-may also want to adjust `SHARD_SIZE` and `SHARD_BATCH_SIZE` to limit
-msemory ussage. See the [SP1
-book](https://docs.succinct.xyz/generating-proofs/advanced.html).
-
-```
-$ RAYON_NUM_THREADS=4 SHARD_BATCH_SIZE=1 SHARD_SIZE=2097152 RUSTFLAGS='-C target-cpu=native' cargo test
-```
+To run the tests for the non-zkvm implementation, `cargo test` is used
+as usual. To test the zkvm variant, use `cargo test` in the
+`tests/script` directory instead.
