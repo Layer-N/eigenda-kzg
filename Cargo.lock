@@ -313,6 +313,8 @@ dependencies = [
  "ark-ff",
  "ark-std",
  "proptest",
+ "rand",
+ "rand_chacha",
  "rust-kzg-bn254",
 ]
 

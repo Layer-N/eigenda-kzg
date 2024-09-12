@@ -4,10 +4,10 @@
 //! # let data = &[1, 2, 3, 4];
 //! #
 //! # fn disperse(data: &[u8]) -> [u8; 64] {
-//! #     eigenda_kzg::commit(&eigenda_kzg::decode_delimited(data).unwrap()).unwrap()
+//! #     eigenda_kzg::commit_raw(&data).unwrap().unwrap()
 //! # }
 //! let actual = disperse(&eigenda_kzg::encode_delimited(data));
-//! let expected = eigenda_kzg::commit(data).unwrap();
+//! let expected = eigenda_kzg::commit_delimited(data).unwrap();
 //!
 //! assert_eq!(actual, expected);
 //! ```
@@ -20,22 +20,26 @@ const ELEM_SIZE: usize = 32;
 // Each chunk is padded to 32 bytes to match serialization requirements.
 const CHUNK_SIZE: usize = ELEM_SIZE - 1;
 
-/// Blobs larger than this size return an error.
+/// Maximum blob size for [`commit_delimited`].
 // -1 to account for sentinel.
 pub const MAX_BLOB_SIZE: usize = points::G1_COEFF_MONT_U8_LE.len() * CHUNK_SIZE - 1;
 
-/// The sentinel appended to the end of the array prior to committing.
+/// Maximum blob size for [`commit_raw`].
+pub const MAX_RAW_BLOB_SIZE: usize = points::G1_COEFF_MONT_U8_LE.len() * ELEM_SIZE;
+
+const _: () = assert!(MAX_BLOB_SIZE <= MAX_RAW_BLOB_SIZE);
+
+/// The sentinel appended to the end of the array with [`encode_delimited`].
 ///
-/// This and adding the appropriate padding is already handled by [`commit`].
+/// This and adding the appropriate padding is already handled by [`commit_delimited`].
 pub const SENTINEL: u8 = 1;
 const _: () = assert!(SENTINEL != 0);
 
-/// Computes the commitment of the given data.
+/// Computes the commitment of the given data, first applying [`encode_delimited`].
 ///
 /// You **do not** need to call [`encode_delimited`], as this function already
 /// appends the sentinel and inserts padding. If you need to compute the commitment
-/// to a blob of data that is already serialized, use [`decode_delimited`] to
-/// deserialize it first.
+/// to a blob of data that is already serialized, use [`commit_raw`].
 ///
 /// Blobs larger than [`MAX_BLOB_SIZE`] return an error. All other blobs return a
 /// valid, non-zero 64-byte commitment.
@@ -44,29 +48,28 @@ const _: () = assert!(SENTINEL != 0);
 /// 64-byte array of little-endian bytes. The first 32 bytes correspond
 /// to the x-coordinate, and the latter 32-bytes correspond to the
 /// y-coordinate. The identity is never serialized.
-pub fn commit(data: &[u8]) -> Result<[u8; 64], CommitError> {
+pub fn commit_delimited(data: &[u8]) -> Result<[u8; 64], CommitDelimitedError> {
     if data.len() > MAX_BLOB_SIZE {
-        return Err(CommitError {});
+        return Err(CommitDelimitedError {});
     }
 
-    Ok(commit_(data))
+    Ok(commit_delimited_(data))
 }
 
 /// Error returned by [`commit`].
 ///
 /// This only happens if the blob is too large. If the blob has length less
 /// than or equal to [`MAX_BLOB_SIZE`], [`commit`] will always return ok.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct CommitError {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitDelimitedError {}
 
-impl std::fmt::Display for CommitError {
+impl std::fmt::Display for CommitDelimitedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "blob is too large")
     }
 }
 
-impl std::error::Error for CommitError {}
+impl std::error::Error for CommitDelimitedError {}
 
 /// Splits the slice into a slice of N-element arrays, starting at the beginning of the slice, and
 /// a remainder slice with length strictly less than N.
@@ -216,7 +219,7 @@ impl std::error::Error for DecodeError {}
 /// Computes the commitment, panicking if the blob is too large.
 #[cfg(all(target_os = "zkvm", target_vendor = "succinct"))]
 #[inline]
-fn commit_(xs: &[u8]) -> [u8; 64] {
+fn commit_delimited_(xs: &[u8]) -> [u8; 64] {
     #![allow(clippy::assertions_on_constants)]
     use std::mem::{align_of, size_of};
 
@@ -284,16 +287,16 @@ fn commit_(xs: &[u8]) -> [u8; 64] {
     unsafe { std::mem::transmute(r) }
 }
 
-/// Computes the commitment, panicking if the blob is too large.
 #[cfg(not(all(target_os = "zkvm", target_vendor = "succinct")))]
-#[inline]
-fn commit_(xs: &[u8]) -> [u8; 64] {
-    use ark_bn254::{Fq, Fr, G1Affine, G1Projective};
-    use ark_ec::AffineRepr;
-    use ark_ec::{CurveGroup as _, VariableBaseMSM as _};
-    use ark_ff::{BigInt, BigInteger, PrimeField};
+const G1_COEFF_LEN: usize = points::G1_COEFF_MONT_U8_LE.len();
 
-    #[allow(long_running_const_eval)]
+// `static` to keep stack usage small.
+#[allow(long_running_const_eval)]
+#[cfg(not(all(target_os = "zkvm", target_vendor = "succinct")))]
+static G1_COEFF: &[ark_bn254::G1Affine; G1_COEFF_LEN] = &{
+    use ark_bn254::{Fq, G1Affine};
+    use ark_ff::BigInt;
+
     const fn u8_to_u64(x: [u8; 32]) -> [u64; 4] {
         let x = unsafe { std::mem::transmute::<_, [[u8; 8]; 4]>(x) };
         let mut r = [0; 4];
@@ -305,26 +308,51 @@ fn commit_(xs: &[u8]) -> [u8; 64] {
         r
     }
 
-    const LEN: usize = points::G1_COEFF_MONT_U8_LE.len();
+    let mut r = [G1Affine::identity(); G1_COEFF_LEN];
+    let mut i = 0;
 
-    // `static` to keep stack usage small.
-    #[allow(long_running_const_eval)]
-    static G1_COEFF: &[G1Affine; LEN] = &{
-        let mut r = [G1Affine::identity(); LEN];
-        let mut i = 0;
-        while i < LEN {
-            let [x, y] = points::G1_COEFF_MONT_U8_LE[i];
-            let x = u8_to_u64(x);
-            let y = u8_to_u64(y);
-            let g = G1Affine::new_unchecked(
-                Fq::new_unchecked(BigInt::new(x)),
-                Fq::new_unchecked(BigInt::new(y)),
-            );
-            r[i] = g;
-            i += 1;
-        }
-        r
-    };
+    while i < G1_COEFF_LEN {
+        let [x, y] = points::G1_COEFF_MONT_U8_LE[i];
+        let x = u8_to_u64(x);
+        let y = u8_to_u64(y);
+        let g = G1Affine::new_unchecked(
+            Fq::new_unchecked(BigInt::new(x)),
+            Fq::new_unchecked(BigInt::new(y)),
+        );
+        r[i] = g;
+        i += 1;
+    }
+    r
+};
+
+/// Performs the multiscalar multiplication between the provided points.
+///
+/// Result is a [`ark_bn254::G1Affine`] serialized to little-endian
+/// bytes. The zero point is serialized as `None`. Otherwise, the point
+/// is serialized as `Some([x, y])`, where `x` and `y` are little-endian
+#[cfg(not(all(target_os = "zkvm", target_vendor = "succinct")))]
+fn msm(gs: &[ark_bn254::G1Affine], es: &[ark_bn254::Fr]) -> Option<[u8; 64]> {
+    use ark_ec::AffineRepr as _;
+    use ark_ec::{CurveGroup as _, VariableBaseMSM as _};
+    use ark_ff::{BigInteger as _, PrimeField as _};
+    let c = ark_bn254::G1Projective::msm(gs, &es).unwrap().into_affine();
+    let (x, y) = c.xy()?;
+    let x = x.into_bigint().to_bytes_le();
+    let y = y.into_bigint().to_bytes_le();
+    assert!(x.len() <= 32);
+    assert!(y.len() <= 32);
+    let mut r = [0u8; 64];
+    r[..x.len()].copy_from_slice(&x);
+    r[32..y.len() + 32].copy_from_slice(&y);
+    Some(r)
+}
+
+/// Computes the commitment, panicking if the blob is too large.
+#[cfg(not(all(target_os = "zkvm", target_vendor = "succinct")))]
+#[inline]
+fn commit_delimited_(xs: &[u8]) -> [u8; 64] {
+    use ark_bn254::Fr;
+    use ark_ff::PrimeField as _;
 
     assert!(xs.len() <= MAX_BLOB_SIZE);
     let mut es = Vec::with_capacity(xs.len().div_ceil(CHUNK_SIZE));
@@ -345,27 +373,142 @@ fn commit_(xs: &[u8]) -> [u8; 64] {
 
     assert!(es.len() <= G1_COEFF.len());
     let gs = &G1_COEFF[..es.len()];
-    let c = G1Projective::msm(gs, &es).unwrap().into_affine();
-    let (x, y) = c.xy().expect("should not be zero");
-    let x = x.into_bigint().to_bytes_le();
-    let y = y.into_bigint().to_bytes_le();
 
-    assert!(x.len() <= 32);
-    assert!(y.len() <= 32);
-
-    let mut r = [0u8; 64];
-    r[..x.len()].copy_from_slice(&x);
-    r[32..y.len() + 32].copy_from_slice(&y);
-    r
+    msm(gs, &es).expect("should not be zero")
 }
+
+/// Computes the commitment of the data.
+///
+/// The requirements for the data are:
+///
+/// - The data must be non-empty.
+/// - The data length must be a multiple of 32.
+/// - The data length must not exceed [`MAX_RAW_BLOB_SIZE`].
+/// - Each 32 bytes is a big-endian field element within the Fr field modulus.
+///
+/// For more details and to understand the requirements, read the official
+/// [serialization requirements]. This function also rejects empty data. Although
+/// _technically_ this should just returna zero commitment, EigenDA's API returns
+/// an error, so we do this to match.
+///
+/// This function is not available on SP1, though it could be ported if
+/// necessary.
+///
+/// [serialization requirements]: https://docs.eigenlayer.xyz/eigenda/integrations-guides/dispersal/api-documentation/blob-serialization-requirements
+#[cfg(not(all(target_os = "zkvm", target_vendor = "succinct")))]
+pub fn commit_raw(data: &[u8]) -> Result<Option<[u8; 64]>, CommitRawError> {
+    use ark_bn254::Fr;
+    use ark_ff::{BigInt, PrimeField as _};
+
+    if data.is_empty() {
+        return Err(CommitRawError::Empty);
+    }
+
+    if data.len() > MAX_RAW_BLOB_SIZE {
+        return Err(CommitRawError::TooLarge);
+    }
+
+    let (xs, []) = as_chunks::<ELEM_SIZE>(data) else {
+        return Err(CommitRawError::LengthNotMultipleOf32);
+    };
+
+    let expected_len = xs.len();
+    let mut es = Vec::with_capacity(expected_len);
+
+    for (i, mut buf) in xs.iter().copied().enumerate() {
+        // convert to little-endian.
+        buf.reverse();
+
+        // `BigInt` is little-endian.
+        let e = BigInt::<4>([
+            u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+            u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            u64::from_le_bytes(buf[16..24].try_into().unwrap()),
+            u64::from_le_bytes(buf[24..32].try_into().unwrap()),
+        ]);
+
+        es.push(Fr::from_bigint(e).ok_or(CommitRawError::ScalarTooLarge(i))?);
+    }
+
+    assert_eq!(es.len(), expected_len);
+    assert!(es.len() <= G1_COEFF.len());
+    let gs = &G1_COEFF[..es.len()];
+
+    Ok(msm(gs, &es))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitRawError {
+    /// The blob is empty. An empty blob should probably return a zero commitment,
+    /// but EigenDA's API returns an error, so we do this to match.
+    Empty,
+    /// The blob is larger than [`MAX_RAW_BLOB_SIZE`].
+    TooLarge,
+    /// The blob is not a multiple of 32.
+    LengthNotMultipleOf32,
+    /// Scalar at index `i` is greater than the modulus.
+    ScalarTooLarge(usize),
+}
+
+impl std::fmt::Display for CommitRawError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommitRawError::Empty => write!(f, "blob is empty"),
+            CommitRawError::LengthNotMultipleOf32 => write!(f, "blob is not a multiple of 32"),
+            CommitRawError::TooLarge => write!(f, "blob is too large"),
+            CommitRawError::ScalarTooLarge(i) => {
+                write!(f, "scalar at {} is larger than field modulus", i)
+            }
+        }
+    }
+}
+
+impl std::error::Error for CommitRawError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_ff::UniformRand as _;
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use rand::SeedableRng as _;
+    use rand_chacha::ChaCha8Rng;
 
-    const SAMPLES_DIR: &str = "samples";
+    /// Serializes the [`ark_ff::BigInt`] as big-endian.
+    fn ser_bigint_be(x: ark_ff::BigInt<4>) -> [u8; 32] {
+        let x = &x.0;
+        let mut buf = [0; 32];
+        for i in 0..4 {
+            buf[i * 8..(i + 1) * 8].copy_from_slice(&x[i].to_le_bytes());
+        }
+        buf.reverse();
+        buf
+    }
+
+    /// Generates a random [`ark_bn254::Fr`] serialized as big-endian.
+    fn fr_valid_be() -> impl Strategy<Value = [u8; 32]> {
+        any::<[u8; 32]>().prop_map(|x| {
+            let x = ark_bn254::Fr::rand(&mut ChaCha8Rng::from_seed(x));
+            let x = ark_ff::PrimeField::into_bigint(x);
+            ser_bigint_be(x)
+        })
+    }
+
+    /// Generates a random big-endian [`ark_ff::BigInt`] that is not
+    /// in the field modulus. Used to generate invalid scalars.
+    fn fr_invalid_be() -> impl Strategy<Value = [u8; 32]> {
+        any::<[u8; 32]>().prop_filter_map("fr must be out of range", |x| {
+            let x = ark_ff::BigInt::rand(&mut ChaCha8Rng::from_seed(x));
+            let modulo = <ark_bn254::Fr as ark_ff::PrimeField>::MODULUS;
+            // scalar is 254 bits, bigint is 256 bits, so a bit over
+            // 3/4 of the sample space is invalid, making this a
+            // reasonable filter.
+            match x >= modulo {
+                true => Some(ser_bigint_be(x)),
+                false => None,
+            }
+        })
+    }
 
     #[test]
     fn delimited_dec_empty() {
@@ -450,6 +593,8 @@ mod tests {
     // our implementation does not diverge from the reference.
     #[test]
     fn samples() {
+        const SAMPLES_DIR: &str = "samples";
+
         for entry in std::fs::read_dir(SAMPLES_DIR).unwrap() {
             let path = entry.unwrap().path();
 
@@ -461,13 +606,25 @@ mod tests {
             let data = std::fs::read(&path).unwrap();
             let expect = std::fs::read(path.with_extension("commit")).unwrap();
             let expect = <[u8; 64]>::try_from(expect).unwrap();
-            assert_eq!(commit(&data).unwrap(), expect);
+            assert_eq!(commit_delimited(&data).unwrap(), expect);
+            assert_eq!(commit_raw(&encode_delimited(&data)).unwrap(), Some(expect));
         }
+    }
+
+    fn commit_eigen_raw(xs: &[u8]) -> Result<Option<[u8; 64]>, Box<dyn std::error::Error>> {
+        commit_eigen_(xs, false)
+    }
+
+    fn commit_eigen_delim(xs: &[u8]) -> Result<[u8; 64], Box<dyn std::error::Error>> {
+        commit_eigen_(xs, true).map(|x| x.unwrap())
     }
 
     /// Computes a commitment using `rust-kzg-bn254`, while including
     /// our custom delimited encoding format.
-    fn commit_eigen(xs: &[u8]) -> Result<[u8; 64], Box<dyn std::error::Error>> {
+    fn commit_eigen_(
+        xs: &[u8],
+        encode: bool,
+    ) -> Result<Option<[u8; 64]>, Box<dyn std::error::Error>> {
         use ark_ec::AffineRepr as _;
         use ark_ff::{BigInteger as _, PrimeField as _};
         use std::sync::OnceLock;
@@ -489,19 +646,41 @@ mod tests {
             )
             .unwrap()
         });
-        let poly = {
+        let blob = if encode {
             // Our encoding is similar to theirs, but with a sentinel.
             let mut xs = xs.to_vec();
             xs.push(SENTINEL);
-            let mut blob = rust_kzg_bn254::blob::Blob::new(xs.to_vec());
-            blob.pad_data().unwrap();
-            blob.to_polynomial(rust_kzg_bn254::polynomial::PolynomialFormat::InEvaluationForm)?
+            let mut xs = rust_kzg_bn254::blob::Blob::new(xs);
+            xs.pad_data().unwrap();
+            xs
+        } else {
+            rust_kzg_bn254::blob::Blob::from_padded_bytes_unchecked(xs)
         };
+        let poly =
+            blob.to_polynomial(rust_kzg_bn254::polynomial::PolynomialFormat::InEvaluationForm)?;
         let c = kzg.commit(&poly)?;
-        let (x, y) = c.xy().expect("should not be zero");
+        let Some((x, y)) = c.xy() else {
+            return Ok(None);
+        };
         let x = x.into_bigint().to_bytes_le();
         let y = y.into_bigint().to_bytes_le();
-        Ok([x, y].concat().try_into().unwrap())
+        Ok(Some([x, y].concat().try_into().unwrap()))
+    }
+
+    fn commit_raw_delim(xs: &[u8]) -> Result<Option<[u8; 64]>, CommitRawError> {
+        commit_raw(&encode_delimited(xs))
+    }
+
+    #[test]
+    fn commit_empty() {
+        let expected = commit_eigen_delim(&[]).unwrap();
+        assert_eq!(commit_delimited(&[]), Ok(expected));
+        assert_eq!(commit_raw_delim(&[]), Ok(Some(expected)));
+    }
+
+    #[test]
+    fn commit_empty_raw() {
+        assert_eq!(commit_raw(&[]), Err(CommitRawError::Empty));
     }
 
     proptest! {
@@ -509,22 +688,74 @@ mod tests {
 
         #[test]
         fn commit_too_large(xs in vec(any::<u8>(), MAX_BLOB_SIZE + 1..MAX_BLOB_SIZE * 2)) {
-            prop_assert!(commit(&xs).is_err());
+            prop_assert!(commit_delimited(&xs).is_err());
         }
 
         #[test]
-        fn commit_zeroes(xs in vec(0u8..=0, 1..=MAX_BLOB_SIZE)) {
-            prop_assert_eq!(commit(&xs).unwrap(), commit_eigen(&xs).unwrap());
+        fn commit_too_large_raw(xs in vec(any::<u8>(), MAX_RAW_BLOB_SIZE + 1..MAX_RAW_BLOB_SIZE * 2)) {
+            prop_assert_eq!(commit_raw(&xs), Err(CommitRawError::TooLarge));
+        }
+
+        #[test]
+        fn commit_invalid_len_raw(
+            xs in vec(any::<u8>(), 1..=MAX_RAW_BLOB_SIZE)
+                .prop_filter(
+                    "length must not be multiple of 32",
+                    |x| x.len() % ELEM_SIZE != 0,
+                )
+        ) {
+            prop_assert_eq!(commit_raw(&xs), Err(CommitRawError::LengthNotMultipleOf32));
+        }
+
+        #[test]
+        fn commit_zeroes(xs in vec(0u8..=0, 0..=MAX_BLOB_SIZE)) {
+            let expected = commit_eigen_delim(&xs).unwrap();
+            prop_assert_eq!(commit_delimited(&xs), Ok(expected));
+            prop_assert_eq!(commit_raw_delim(&xs), Ok(Some(expected)));
+        }
+
+        #[test]
+        fn commit_zeroes_raw(
+            xs in (0..=(MAX_RAW_BLOB_SIZE / 32))
+                .prop_flat_map(|x| vec(0..=0u8, x * 32))
+        ) {
+            prop_assert_eq!(commit_eigen_raw(&xs).unwrap(), None);
+            prop_assert_eq!(commit_raw(&xs), Ok(None));
         }
 
         #[test]
         fn commit_largest(xs in vec(any::<u8>(), MAX_BLOB_SIZE)) {
-            prop_assert_eq!(commit(&xs).unwrap(), commit_eigen(&xs).unwrap());
+            let expected = commit_eigen_delim(&xs).unwrap();
+            prop_assert_eq!(commit_delimited(&xs).unwrap(), expected);
+            prop_assert_eq!(commit_raw_delim(&xs).unwrap(), Some(expected));
         }
 
         #[test]
-        fn commit_random(xs in vec(any::<u8>(), 1..=MAX_BLOB_SIZE)) {
-            prop_assert_eq!(commit(&xs).unwrap(), commit_eigen(&xs).unwrap());
+        fn commit_random(xs in vec(any::<u8>(), 0..=MAX_BLOB_SIZE)) {
+            let expected = commit_eigen_delim(&xs).unwrap();
+            prop_assert_eq!(commit_delimited(&xs), Ok(expected));
+            prop_assert_eq!(commit_raw_delim(&xs), Ok(Some(expected)));
+        }
+
+        #[test]
+        fn commit_random_raw(
+            xs in vec(fr_valid_be(), 1..=(MAX_RAW_BLOB_SIZE / 32))
+                .prop_map(|x: Vec<[u8; 32]>| x.concat())
+        ) {
+            let expected = commit_eigen_raw(&xs).unwrap();
+            prop_assert_eq!(commit_raw(&xs), Ok(expected));
+        }
+
+        #[test]
+        fn commit_random_raw_invalid(
+            (i, xs) in (1..=MAX_RAW_BLOB_SIZE / 32)
+                .prop_flat_map(|len| (0..len, vec(fr_valid_be(), len), fr_invalid_be()))
+                .prop_map(|(i, mut xs, invalid)| {
+                    xs[i] = invalid;
+                    (i, xs.concat())
+                })
+        ) {
+            prop_assert_eq!(commit_raw(&xs), Err(CommitRawError::ScalarTooLarge(i)));
         }
 
         #[test]
@@ -536,8 +767,9 @@ mod tests {
                     xs
                 })
         ) {
-            let expected = commit_eigen(&xs).unwrap();
-            prop_assert_eq!(commit(&xs).unwrap(), expected);
+            let expected = commit_eigen_delim(&xs).unwrap();
+            prop_assert_eq!(commit_delimited(&xs), Ok(expected));
+            prop_assert_eq!(commit_raw_delim(&xs), Ok(Some(expected)));
         }
     }
 }

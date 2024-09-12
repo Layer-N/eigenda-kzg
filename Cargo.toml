@@ -8,9 +8,11 @@ authors = ["Sheheryar Parvaz <me@cherryman.org>"]
 
 [dev-dependencies]
 proptest = "1.5.0"
+rand = "0.8.5"
+rand_chacha = "0.3.1"
 rust-kzg-bn254 = { git = "https://github.com/cherryman/rust-kzg-bn254.git" }
 
-[target.'cfg(not(all(target_os = "zkvm", target_vendor = "succinct", target_arch = "riscv32")))'.dependencies]
+[target.'cfg(not(all(target_os = "zkvm", target_vendor = "succinct")))'.dependencies]
 ark-bn254 = "0.4.0"
 ark-ec = "0.4.2"
 ark-ff = "0.4.2"
@@ -18,3 +20,8 @@ ark-std = "0.4.0"
 
 [profile.test]
 inherits = "release"
+
+# https://doc.rust-lang.org/nightly/rustc/check-cfg.html
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(target_vendor, values("succinct"))']

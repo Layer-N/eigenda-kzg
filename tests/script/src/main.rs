@@ -29,6 +29,6 @@ fn main() {
     println!("report: {:?}", report);
 
     let result: [u8; 64] = pub_vals.as_slice().try_into().unwrap();
-    let expected = eigenda_kzg::commit(&input).unwrap();
+    let expected = eigenda_kzg::commit_delimited(&input).unwrap();
     assert_eq!(result, expected);
 }

@@ -2,7 +2,7 @@ const ELF: &[u8] = include_bytes!("../../program/elf/riscv32im-succinct-zkvm-elf
 const SAMPLES_DIR: &str = "../../samples";
 
 fn commit_native(payload: &[u8]) -> Result<[u8; 64], Box<dyn std::error::Error>> {
-    eigenda_kzg::commit(payload).map_err(Into::into)
+    eigenda_kzg::commit_delimited(payload).map_err(Into::into)
 }
 
 fn commit_sp1(payload: &[u8]) -> Result<[u8; 64], Box<dyn std::error::Error>> {
