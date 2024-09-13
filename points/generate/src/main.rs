@@ -21,7 +21,7 @@ fn main() -> std::io::Result<()> {
         "",
         g2.to_str().unwrap(),
         268435456,
-        131072,
+        262144,
     )
     .unwrap();
 
